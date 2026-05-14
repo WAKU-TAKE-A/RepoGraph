@@ -1,0 +1,51 @@
+# RepoGraph .gitignore
+
+# User Requested
+_sample/
+
+# Analysis Workspace (Output)
+analysis_workspace/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# .NET / C#
+[Bb]in/
+[Oo]bj/
+*.user
+*.userosscache
+*.sln.docuser
+.vs/
+.idea/
+.vscode/
+
+# Build artifacts
+*.exe
+*.dll
+*.pdb
+*.nupkg
+
+# Databases / Data
+*.db
+*.db-shm
+*.db-wal
+*.index
+*.json
+!analyzer.yml
+!rag_config.yml
+
+# Logs
+*.log
+analysis_log.txt
+
+# OS / Misc
+.DS_Store
+Thumbs.db
+desktop.ini

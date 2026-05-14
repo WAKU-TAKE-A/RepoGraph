@@ -1,0 +1,28 @@
+exclude:
+  directories:
+    - bin
+    - obj
+    - packages
+    - node_modules
+    - TestResults
+  filePatterns:
+    - "*.Designer.cs"
+    - "*.g.cs"
+    - "*.generated.cs"
+    - "*.AssemblyInfo.cs"
+    - "*.AssemblyAttributes.cs"
+  paths:
+    - "**/Service References/**"
+    - "**/Connected Services/**"
+  namespaces:
+    - "*.Generated.*"
+
+analysis:
+  includeCallGraph: true
+  includeInheritance: true
+  includeInterfaceMappings: true
+  includeMethodBodies: true
+
+performance:
+  parallelism: 4
+  maxDocumentSizeMB: 8

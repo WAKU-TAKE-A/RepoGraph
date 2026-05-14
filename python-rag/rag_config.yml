@@ -1,0 +1,22 @@
+database:
+  path: C:/tmp/RepoGraph/analysis_workspace/ScreenToGif/output/repository.db
+
+graphs:
+  directory: C:/tmp/RepoGraph/analysis_workspace/ScreenToGif/graphs
+
+output:
+  directory: C:/tmp/RepoGraph/analysis_workspace/ScreenToGif/output
+  embeddings_dir: C:/tmp/RepoGraph/analysis_workspace/ScreenToGif/output/embeddings
+
+embedding:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  batch_size: 64
+  device: cpu
+
+faiss:
+  index_type: HNSW  # 'HNSW' for scalability or 'FlatIP'
+  hnsw_m: 32
+
+retrieval:
+  top_k: 20
+  graph_expansion_depth: 2
