@@ -5,6 +5,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from loguru import logger
 from models import Base, Symbol
+from graph import GraphLoader
+from summarize import Summarizer
+from index import SentenceTransformerProvider, FaissIndexer
+from retrieval import Retriever
+from hotspots import HotspotScorer
 import networkx as nx
 import json
 
@@ -36,19 +41,85 @@ def doctor():
 
 @app.command()
 def build_index():
-    """Build embedding + FAISS index (Placeholder)."""
+    """Build embedding + FAISS index."""
     config = load_config()
     db_path = config["database"]["path"]
+    graphs_dir = config["graphs"]["directory"]
+    out_dir = config["output"]["embeddings_dir"]
+    model_name = config["embedding"]["model"]
+    batch_size = config["embedding"]["batch_size"]
+    device = config["embedding"]["device"]
     
+    # 1. Load Graphs
+    graph_loader = GraphLoader(graphs_dir)
+    graph_loader.load_all()
+    
+    # 2. Init DB session
     engine = create_engine(f"sqlite:///{db_path}")
     Session = sessionmaker(bind=engine)
     session = Session()
     
-    symbols = session.query(Symbol).all()
-    logger.info(f"Loaded {len(symbols)} symbols from database.")
+    # 3. Setup Summarizer
+    summarizer = Summarizer(graph_loader)
     
-    # TODO: Implement actual embedding generation and FAISS index construction
-    logger.info("Index build completed (Placeholder).")
+    # 4. Setup Embedding Provider & Indexer
+    provider = SentenceTransformerProvider(model_name, device=device)
+    indexer = FaissIndexer(provider, out_dir)
+    
+    # 5. Build Index
+    indexer.build_index(session, summarizer, batch_size=batch_size)
+    
+    logger.info("Index build completed successfully.")
+
+@app.command()
+def query(text: str):
+    """Semantic + graph-aware query."""
+    config = load_config()
+    graphs_dir = config["graphs"]["directory"]
+    out_dir = config["output"]["embeddings_dir"]
+    model_name = config["embedding"]["model"]
+    device = config["embedding"]["device"]
+    top_k = config["retrieval"]["top_k"]
+    depth = config["retrieval"]["graph_expansion_depth"]
+
+    graph_loader = GraphLoader(graphs_dir)
+    graph_loader.load_all()
+    
+    provider = SentenceTransformerProvider(model_name, device=device)
+    retriever = Retriever(provider, out_dir, graph_loader)
+    
+    results = retriever.search(text, top_k=top_k, expansion_depth=depth)
+    
+    if not results:
+        logger.warning("No results found.")
+        return
+        
+    for i, res in enumerate(results):
+        print(f"\n--- Result {i+1} (Score: {res['score']:.4f}) ---")
+        print(f"FQN: {res['fqn']}")
+        print(f"Summary: {res['summary']}")
+        if res['context']:
+            print("Graph Context:")
+            for ctx in res['context']:
+                print(f"  - {ctx}")
+
+@app.command()
+def hotspots():
+    """Compute and display hotspot rankings."""
+    config = load_config()
+    db_path = config["database"]["path"]
+    graphs_dir = config["graphs"]["directory"]
+    reports_dir = os.path.join(config["output"]["directory"], "reports")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    graph_loader = GraphLoader(graphs_dir)
+    graph_loader.load_all()
+
+    scorer = HotspotScorer(session, graph_loader, reports_dir)
+    scorer.generate_reports()
 
 if __name__ == "__main__":
     app()

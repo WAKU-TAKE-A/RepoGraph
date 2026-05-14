@@ -5,6 +5,8 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Probe.Services.Analysis
 {
@@ -17,8 +19,9 @@ namespace Probe.Services.Analysis
             _logger = logger;
         }
 
-        public IEnumerable<SymbolData> ExtractSymbols(Compilation compilation, SyntaxTree tree)
+        public ExtractionResult Extract(Compilation compilation, SyntaxTree tree)
         {
+            var result = new ExtractionResult();
             var semanticModel = compilation.GetSemanticModel(tree);
             var root = tree.GetRoot();
 
@@ -48,17 +51,80 @@ namespace Probe.Services.Analysis
 
                 if (symbol != null)
                 {
-                    yield return MapToData(symbol, node);
+                    var symbolData = MapToData(symbol, node);
+                    result.Symbols.Add(symbolData);
+
+                    // Extract inheritance
+                    if (symbol is INamedTypeSymbol namedType)
+                    {
+                        if (namedType.BaseType != null && namedType.BaseType.SpecialType != SpecialType.System_Object)
+                        {
+                            result.Inheritances.Add(new InheritanceData
+                            {
+                                DerivedId = symbolData.Fqn,
+                                BaseId = namedType.BaseType.ToDisplayString(),
+                                Kind = "extends"
+                            });
+                        }
+                        foreach (var iface in namedType.Interfaces)
+                        {
+                            result.Inheritances.Add(new InheritanceData
+                            {
+                                DerivedId = symbolData.Fqn,
+                                BaseId = iface.ToDisplayString(),
+                                Kind = "implements"
+                            });
+                        }
+                    }
+
+                    // Extract method calls
+                    if (node is MethodDeclarationSyntax methodNode && symbol is IMethodSymbol methodSymbol)
+                    {
+                        var invocations = methodNode.DescendantNodes().OfType<InvocationExpressionSyntax>();
+                        foreach (var invocation in invocations)
+                        {
+                            var symbolInfo = semanticModel.GetSymbolInfo(invocation);
+                            if (symbolInfo.Symbol is IMethodSymbol calledMethod)
+                            {
+                                result.MethodCalls.Add(new MethodCallData
+                                {
+                                    CallerId = symbolData.Fqn,
+                                    CalleeId = calledMethod.OriginalDefinition.ToDisplayString(),
+                                    CallCount = 1
+                                });
+                            }
+                        }
+                    }
                 }
             }
+
+            // Aggregate call counts
+            result.MethodCalls = result.MethodCalls
+                .GroupBy(c => new { c.CallerId, c.CalleeId })
+                .Select(g => new MethodCallData
+                {
+                    CallerId = g.Key.CallerId,
+                    CalleeId = g.Key.CalleeId,
+                    CallCount = g.Sum(x => x.CallCount)
+                }).ToList();
+
+            return result;
+        }
+
+        private static string GetStableHash(string input)
+        {
+            using var sha256 = SHA256.Create();
+            var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(input));
+            return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
         }
 
         private SymbolData MapToData(ISymbol symbol, SyntaxNode node)
         {
+            var fqn = symbol.ToDisplayString();
             var data = new SymbolData
             {
-                Id = Guid.NewGuid().ToString(), // Should be stable hash in real impl
-                Fqn = symbol.ToDisplayString(),
+                Id = GetStableHash(fqn), // Use stable hash for ID
+                Fqn = fqn,
                 Name = symbol.Name,
                 Kind = symbol.Kind.ToString().ToLower(),
                 Namespace = symbol.ContainingNamespace?.ToDisplayString(),
@@ -118,5 +184,26 @@ namespace Probe.Services.Analysis
         public int Loc { get; set; }
         public int ParameterCount { get; set; }
         public string ReturnType { get; set; }
+    }
+
+    public class MethodCallData
+    {
+        public string CallerId { get; set; }
+        public string CalleeId { get; set; }
+        public int CallCount { get; set; }
+    }
+
+    public class InheritanceData
+    {
+        public string DerivedId { get; set; }
+        public string BaseId { get; set; }
+        public string Kind { get; set; }
+    }
+
+    public class ExtractionResult
+    {
+        public List<SymbolData> Symbols { get; set; } = new List<SymbolData>();
+        public List<MethodCallData> MethodCalls { get; set; } = new List<MethodCallData>();
+        public List<InheritanceData> Inheritances { get; set; } = new List<InheritanceData>();
     }
 }

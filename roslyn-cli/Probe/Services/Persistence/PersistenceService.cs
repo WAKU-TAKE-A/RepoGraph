@@ -1,6 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Probe.Services.Analysis;
 
@@ -29,14 +30,16 @@ namespace Probe.Services.Persistence
             _logger.LogInformation("Database initialized at {Path}", _connectionString);
         }
 
-        public async Task SaveSymbolAsync(SymbolData data)
+        public async Task SaveSymbolsAsync(IEnumerable<SymbolData> symbols)
         {
             using var connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync();
-
+            using var transaction = connection.BeginTransaction();
             using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            
             command.CommandText = @"
-INSERT OR REPLACE INTO symbols (
+INSERT OR IGNORE INTO symbols (
     id, document_id, project_id, fqn, name, kind, namespace, containing_type,
     accessibility, is_static, is_abstract, is_sealed, is_async, is_partial,
     is_generic, is_extension_method, is_disposable, line_start, line_end,
@@ -47,30 +50,113 @@ INSERT OR REPLACE INTO symbols (
     @generic, @ext, @disposable, @lstart, @lend,
     @loc, @pcount, @ret
 )";
-            command.Parameters.AddWithValue("@id", data.Id);
-            command.Parameters.AddWithValue("@docId", (object)data.DocumentId ?? DBNull.Value);
-            command.Parameters.AddWithValue("@projId", data.ProjectId);
-            command.Parameters.AddWithValue("@fqn", data.Fqn);
-            command.Parameters.AddWithValue("@name", data.Name);
-            command.Parameters.AddWithValue("@kind", data.Kind);
-            command.Parameters.AddWithValue("@ns", (object)data.Namespace ?? DBNull.Value);
-            command.Parameters.AddWithValue("@parent", (object)data.ContainingType ?? DBNull.Value);
-            command.Parameters.AddWithValue("@acc", data.Accessibility);
-            command.Parameters.AddWithValue("@static", data.IsStatic ? 1 : 0);
-            command.Parameters.AddWithValue("@abstract", data.IsAbstract ? 1 : 0);
-            command.Parameters.AddWithValue("@sealed", data.IsSealed ? 1 : 0);
-            command.Parameters.AddWithValue("@async", data.IsAsync ? 1 : 0);
-            command.Parameters.AddWithValue("@partial", data.IsPartial ? 1 : 0);
-            command.Parameters.AddWithValue("@generic", data.IsGeneric ? 1 : 0);
-            command.Parameters.AddWithValue("@ext", data.IsExtensionMethod ? 1 : 0);
-            command.Parameters.AddWithValue("@disposable", data.IsDisposable ? 1 : 0);
-            command.Parameters.AddWithValue("@lstart", data.LineStart);
-            command.Parameters.AddWithValue("@lend", data.LineEnd);
-            command.Parameters.AddWithValue("@loc", data.Loc);
-            command.Parameters.AddWithValue("@pcount", data.ParameterCount);
-            command.Parameters.AddWithValue("@ret", (object)data.ReturnType ?? DBNull.Value);
+            
+            var pId = command.Parameters.Add("@id", SqliteType.Text);
+            var pDocId = command.Parameters.Add("@docId", SqliteType.Text);
+            var pProjId = command.Parameters.Add("@projId", SqliteType.Text);
+            var pFqn = command.Parameters.Add("@fqn", SqliteType.Text);
+            var pName = command.Parameters.Add("@name", SqliteType.Text);
+            var pKind = command.Parameters.Add("@kind", SqliteType.Text);
+            var pNs = command.Parameters.Add("@ns", SqliteType.Text);
+            var pParent = command.Parameters.Add("@parent", SqliteType.Text);
+            var pAcc = command.Parameters.Add("@acc", SqliteType.Text);
+            var pStatic = command.Parameters.Add("@static", SqliteType.Integer);
+            var pAbstract = command.Parameters.Add("@abstract", SqliteType.Integer);
+            var pSealed = command.Parameters.Add("@sealed", SqliteType.Integer);
+            var pAsync = command.Parameters.Add("@async", SqliteType.Integer);
+            var pPartial = command.Parameters.Add("@partial", SqliteType.Integer);
+            var pGeneric = command.Parameters.Add("@generic", SqliteType.Integer);
+            var pExt = command.Parameters.Add("@ext", SqliteType.Integer);
+            var pDisp = command.Parameters.Add("@disposable", SqliteType.Integer);
+            var pLstart = command.Parameters.Add("@lstart", SqliteType.Integer);
+            var pLend = command.Parameters.Add("@lend", SqliteType.Integer);
+            var pLoc = command.Parameters.Add("@loc", SqliteType.Integer);
+            var pCount = command.Parameters.Add("@pcount", SqliteType.Integer);
+            var pRet = command.Parameters.Add("@ret", SqliteType.Text);
 
-            await command.ExecuteNonQueryAsync();
+            foreach (var data in symbols)
+            {
+                pId.Value = data.Id;
+                pDocId.Value = (object)data.DocumentId ?? DBNull.Value;
+                pProjId.Value = data.ProjectId;
+                pFqn.Value = data.Fqn;
+                pName.Value = data.Name;
+                pKind.Value = data.Kind;
+                pNs.Value = (object)data.Namespace ?? DBNull.Value;
+                pParent.Value = (object)data.ContainingType ?? DBNull.Value;
+                pAcc.Value = data.Accessibility;
+                pStatic.Value = data.IsStatic ? 1 : 0;
+                pAbstract.Value = data.IsAbstract ? 1 : 0;
+                pSealed.Value = data.IsSealed ? 1 : 0;
+                pAsync.Value = data.IsAsync ? 1 : 0;
+                pPartial.Value = data.IsPartial ? 1 : 0;
+                pGeneric.Value = data.IsGeneric ? 1 : 0;
+                pExt.Value = data.IsExtensionMethod ? 1 : 0;
+                pDisp.Value = data.IsDisposable ? 1 : 0;
+                pLstart.Value = data.LineStart;
+                pLend.Value = data.LineEnd;
+                pLoc.Value = data.Loc;
+                pCount.Value = data.ParameterCount;
+                pRet.Value = (object)data.ReturnType ?? DBNull.Value;
+                await command.ExecuteNonQueryAsync();
+            }
+            await transaction.CommitAsync();
+        }
+
+        public async Task SaveMethodCallsAsync(IEnumerable<MethodCallData> methodCalls)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+
+            command.CommandText = @"
+INSERT INTO method_calls (caller_id, callee_id, call_count)
+SELECT s1.id, s2.id, @count
+FROM symbols s1, symbols s2
+WHERE s1.fqn = @callerFqn AND s2.fqn = @calleeFqn";
+
+            var pCaller = command.Parameters.Add("@callerFqn", SqliteType.Text);
+            var pCallee = command.Parameters.Add("@calleeFqn", SqliteType.Text);
+            var pCount = command.Parameters.Add("@count", SqliteType.Integer);
+
+            foreach (var call in methodCalls)
+            {
+                pCaller.Value = call.CallerId;
+                pCallee.Value = call.CalleeId;
+                pCount.Value = call.CallCount;
+                await command.ExecuteNonQueryAsync();
+            }
+            await transaction.CommitAsync();
+        }
+
+        public async Task SaveInheritancesAsync(IEnumerable<InheritanceData> inheritances)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+
+            command.CommandText = @"
+INSERT INTO inheritance (derived_id, base_id, kind)
+SELECT s1.id, s2.id, @kind
+FROM symbols s1, symbols s2
+WHERE s1.fqn = @derivedFqn AND s2.fqn = @baseFqn";
+
+            var pDerived = command.Parameters.Add("@derivedFqn", SqliteType.Text);
+            var pBase = command.Parameters.Add("@baseFqn", SqliteType.Text);
+            var pKind = command.Parameters.Add("@kind", SqliteType.Text);
+
+            foreach (var inheritance in inheritances)
+            {
+                pDerived.Value = inheritance.DerivedId;
+                pBase.Value = inheritance.BaseId;
+                pKind.Value = inheritance.Kind;
+                await command.ExecuteNonQueryAsync();
+            }
+            await transaction.CommitAsync();
         }
 
         public async Task SaveProjectAsync(string id, string solutionId, string runId, string name, string path)

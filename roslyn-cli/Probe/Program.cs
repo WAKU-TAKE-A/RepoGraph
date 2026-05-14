@@ -6,7 +6,9 @@ using System.IO;
 using System.Threading.Tasks;
 using Probe.Services.Analysis;
 using Probe.Services.Persistence;
+using Probe.Services.Graph;
 using System.Linq;
+using System.Collections.Generic;
 
 namespace Probe
 {
@@ -70,15 +72,35 @@ namespace Probe
                         var tree = await document.GetSyntaxTreeAsync();
                         if (tree == null) continue;
 
-                        var symbols = extractor.ExtractSymbols(compilation, tree);
-                        foreach (var symbol in symbols)
+                        var result = extractor.Extract(compilation, tree);
+                        
+                        foreach (var symbol in result.Symbols)
                         {
                             symbol.ProjectId = projectId;
                             symbol.DocumentId = documentId;
-                            await persistence.SaveSymbolAsync(symbol);
+                        }
+
+                        if (result.Symbols.Any())
+                        {
+                            await persistence.SaveSymbolsAsync(result.Symbols);
+                        }
+                        
+                        if (result.MethodCalls.Any())
+                        {
+                            await persistence.SaveMethodCallsAsync(result.MethodCalls);
+                        }
+
+                        if (result.Inheritances.Any())
+                        {
+                            await persistence.SaveInheritancesAsync(result.Inheritances);
                         }
                     }
                 }
+
+                logger.LogInformation("Generating graphs...");
+                var graphOutputDir = Path.Combine(output, "graphs");
+                var graphService = new GraphService(dbPath, graphOutputDir, serviceProvider.GetRequiredService<ILogger<GraphService>>());
+                await graphService.ExportGraphsAsync(runId);
 
                 logger.LogInformation("Analysis completed.");
 
