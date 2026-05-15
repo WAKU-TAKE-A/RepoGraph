@@ -20,9 +20,9 @@ class GraphLoader:
         logger.info("Graph loading completed.")
 
     def _load_graph(self, filename: str) -> nx.DiGraph:
-        filepath = os.path.join(self.graphs_dir, filename)
-        if not os.path.exists(filepath):
-            logger.warning(f"Graph file not found: {filepath}. Returning empty graph.")
+        filepath = self._resolve_graph_path(filename)
+        if not filepath:
+            logger.warning(f"Graph file not found: {filename} under {self.graphs_dir}. Returning empty graph.")
             return nx.DiGraph()
 
         try:
@@ -38,3 +38,16 @@ class GraphLoader:
         except Exception as e:
             logger.error(f"Failed to load {filepath}: {e}")
             return nx.DiGraph()
+
+    def _resolve_graph_path(self, filename: str) -> str | None:
+        candidates = [
+            os.path.join(self.graphs_dir, filename),
+            os.path.join(self.graphs_dir, "output", "graphs", filename),
+            os.path.join(self.graphs_dir, "graphs", filename),
+        ]
+
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+
+        return None

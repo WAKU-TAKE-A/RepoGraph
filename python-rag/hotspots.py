@@ -2,7 +2,7 @@ import os
 import json
 from typing import List, Dict, Any, Set
 from sqlalchemy.orm import Session
-from models import Symbol, FieldAccess
+from models import Symbol, FieldAccess, Project
 from graph import GraphLoader
 from loguru import logger
 
@@ -25,22 +25,26 @@ class HotspotScorer:
 
     def compute_hotspots(self) -> List[Dict[str, Any]]:
         symbols = self.session.query(Symbol).all()
+        projects = self.session.query(Project).all()
         logger.info(f"Computing hotspots for {len(symbols)} symbols...")
-        
+
+        project_name_by_id = {project.id: project.name for project in projects}
         raw_metrics = []
-        
+
         # 1. Gather raw metrics
         symbols_with_metrics = []
         for symbol in symbols:
             fan_in = self.graph.call_graph.in_degree(symbol.fqn) if symbol.fqn in self.graph.call_graph else 0
             fan_out = self.graph.call_graph.out_degree(symbol.fqn) if symbol.fqn in self.graph.call_graph else 0
-            static_coupling = self.graph.dependency_graph.degree(symbol.fqn) if symbol.fqn in self.graph.dependency_graph else 0
+            project_name = project_name_by_id.get(symbol.project_id, "")
+            static_coupling = self.graph.dependency_graph.degree(project_name) if project_name and project_name in self.graph.dependency_graph else 0
             
             symbols_with_metrics.append({
                 "symbol": symbol,
                 "fan_in": fan_in,
                 "fan_out": fan_out,
-                "static_coupling": static_coupling
+                "static_coupling": static_coupling,
+                "project_name": project_name,
             })
 
         # 1b. Aggregate member Fan-In into Classes
@@ -80,6 +84,9 @@ class HotspotScorer:
                 "has_do_events": bool(s.has_do_events),
                 "has_lock": bool(s.has_lock),
                 "has_callback": bool(s.has_callback),
+                "has_thread_start": bool(s.has_thread_start),
+                "has_blocking_wait": bool(s.has_blocking_wait),
+                "project_name": item["project_name"],
             })
             
         if not raw_metrics:
@@ -112,18 +119,19 @@ class HotspotScorer:
             
             is_anti_pattern = False
             if r["kind"] == "class":
-                # Flag based on combined danger score or extreme size
-                if danger_score > 500 or m["loc"] > 2000:
-                    name_lower = r["fqn"].lower()
-                    # Focus on "Manager", "Station", "Controller", etc.
-                    if any(kw in name_lower for kw in ["manager", "controller", "global", "station", "base"]):
-                        is_anti_pattern = True
+                name_lower = r["fqn"].lower()
+                has_smelly_name = any(kw in name_lower for kw in ["manager", "controller", "global", "station", "base", "editor"])
+                is_anti_pattern = (
+                    danger_score >= 2000 or
+                    (m["loc"] >= 1500 and m["fan_in"] >= 5) or
+                    (has_smelly_name and danger_score >= 500)
+                )
 
             # Threading hazard detection
             is_threading_hazard = (
-                r["has_do_events"] and (r["has_ui_dispatch"] or r["has_background_worker"])
+                r["has_do_events"] and (r["has_ui_dispatch"] or r["has_background_worker"] or r["has_task_spawn"])
             ) or (
-                r["has_ui_dispatch"] and r["has_task_spawn"]
+                r["has_ui_dispatch"] and (r["has_task_spawn"] or r["has_background_worker"] or r["has_thread_start"] or r["has_blocking_wait"])
             )
 
             scored_results.append({
@@ -142,8 +150,11 @@ class HotspotScorer:
                     "has_do_events": r["has_do_events"],
                     "has_lock": r["has_lock"],
                     "has_callback": r["has_callback"],
+                    "has_thread_start": r["has_thread_start"],
+                    "has_blocking_wait": r["has_blocking_wait"],
                 },
-                "metrics": m
+                "metrics": m,
+                "project_name": r["project_name"],
             })
             
         # 4. Sort by score descending
@@ -156,6 +167,11 @@ class HotspotScorer:
         These are "shared mutable state" hotspots that cause race conditions and implicit coupling.
         """
         field_accesses = self.session.query(FieldAccess).all()
+        owned_targets: Set[str] = {
+            fqn for (fqn,) in self.session.query(Symbol.fqn)
+            .filter(Symbol.kind.in_(("field", "property")))
+            .all()
+        }
         if not field_accesses:
             logger.info("No field accesses found.")
             return []
@@ -163,6 +179,9 @@ class HotspotScorer:
         # Group by target field
         target_writers: Dict[str, Dict[str, Any]] = {}
         for fa in field_accesses:
+            if fa.target_fqn not in owned_targets:
+                continue
+
             if fa.access_kind in ("write", "read_write"):
                 if fa.target_fqn not in target_writers:
                     target_writers[fa.target_fqn] = {
@@ -260,12 +279,12 @@ class HotspotScorer:
                 f.write("## 🔴 Threading Hazard Warnings\n\n")
                 f.write("> [!CAUTION]\n")
                 f.write("> The following methods mix UI thread dispatch with background work or use `Application.DoEvents()`, creating re-entrancy and thread safety risks.\n\n")
-                f.write("| # | Symbol (FQN) | UI Dispatch | Task Spawn | BgWorker | DoEvents | Lock |\n")
-                f.write("|---|--------------|-------------|------------|----------|----------|------|\n")
+                f.write("| # | Symbol (FQN) | UI Dispatch | Task Spawn | BgWorker | Thread Start | Blocking Wait | DoEvents | Lock |\n")
+                f.write("|---|--------------|-------------|------------|----------|--------------|---------------|----------|------|\n")
                 for i, h in enumerate(threading_hazards[:30]):
                     tf = h["thread_flags"]
                     link = f"[`{h['fqn']}`]({h['file_name']}#L{h['line_start']})" if h['file_name'] else f"`{h['fqn']}`"
-                    f.write(f"| {i+1} | {link} | {'✅' if tf['has_ui_dispatch'] else '—'} | {'✅' if tf['has_task_spawn'] else '—'} | {'✅' if tf['has_background_worker'] else '—'} | {'⚠️' if tf['has_do_events'] else '—'} | {'🔒' if tf['has_lock'] else '—'} |\n")
+                    f.write(f"| {i+1} | {link} | {'✅' if tf['has_ui_dispatch'] else '—'} | {'✅' if tf['has_task_spawn'] else '—'} | {'✅' if tf['has_background_worker'] else '—'} | {'✅' if tf['has_thread_start'] else '—'} | {'⏳' if tf['has_blocking_wait'] else '—'} | {'⚠️' if tf['has_do_events'] else '—'} | {'🔒' if tf['has_lock'] else '—'} |\n")
                 f.write("\n---\n\n")
 
             # --- Shared Mutable State Warnings ---

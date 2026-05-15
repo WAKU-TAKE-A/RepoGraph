@@ -28,63 +28,37 @@ namespace Probe.Services.Analysis
             foreach (var node in root.DescendantNodes())
             {
                 ISymbol? symbol = null;
-                
-                if (node is BaseTypeDeclarationSyntax typeDecl)
+
+                if (node is FieldDeclarationSyntax fieldDecl)
                 {
-                    symbol = semanticModel.GetDeclaredSymbol(typeDecl);
-                }
-                else if (node is MethodDeclarationSyntax methodDecl)
-                {
-                    symbol = semanticModel.GetDeclaredSymbol(methodDecl);
-                }
-                else if (node is PropertyDeclarationSyntax propDecl)
-                {
-                    symbol = semanticModel.GetDeclaredSymbol(propDecl);
-                }
-                else if (node is FieldDeclarationSyntax fieldDecl)
-                {
-                    // Fields can have multiple variables, handle first for simplicity or all
-                    var variable = fieldDecl.Declaration.Variables.FirstOrDefault();
-                    if (variable != null)
+                    foreach (var variable in fieldDecl.Declaration.Variables)
+                    {
                         symbol = semanticModel.GetDeclaredSymbol(variable);
+                        if (symbol != null)
+                        {
+                            ProcessSymbol(semanticModel, variable, symbol, result);
+                        }
+                    }
+
+                    continue;
                 }
+
+                if (node is BaseTypeDeclarationSyntax typeDecl)
+                    symbol = semanticModel.GetDeclaredSymbol(typeDecl);
+                else if (node is MethodDeclarationSyntax methodDecl)
+                    symbol = semanticModel.GetDeclaredSymbol(methodDecl);
+                else if (node is ConstructorDeclarationSyntax ctorDecl)
+                    symbol = semanticModel.GetDeclaredSymbol(ctorDecl);
+                else if (node is PropertyDeclarationSyntax propDecl)
+                    symbol = semanticModel.GetDeclaredSymbol(propDecl);
+                else if (node is AccessorDeclarationSyntax accessorDecl)
+                    symbol = semanticModel.GetDeclaredSymbol(accessorDecl);
+                else if (node is LocalFunctionStatementSyntax localFunctionDecl)
+                    symbol = semanticModel.GetDeclaredSymbol(localFunctionDecl);
 
                 if (symbol != null)
                 {
-                    var symbolData = MapToData(symbol, node);
-                    result.Symbols.Add(symbolData);
-
-                    // Extract inheritance
-                    if (symbol is INamedTypeSymbol namedType)
-                    {
-                        if (namedType.BaseType != null && namedType.BaseType.SpecialType != SpecialType.System_Object)
-                        {
-                            result.Inheritances.Add(new InheritanceData
-                            {
-                                DerivedId = symbolData.Fqn,
-                                BaseId = namedType.BaseType.ToDisplayString(),
-                                Kind = "extends"
-                            });
-                        }
-                        foreach (var iface in namedType.Interfaces)
-                        {
-                            result.Inheritances.Add(new InheritanceData
-                            {
-                                DerivedId = symbolData.Fqn,
-                                BaseId = iface.ToDisplayString(),
-                                Kind = "implements"
-                            });
-                        }
-                    }
-
-                    // Extract method calls, thread boundaries, field accesses, and event subscriptions
-                    if (node is MethodDeclarationSyntax methodNode && symbol is IMethodSymbol methodSymbol)
-                    {
-                        ExtractMethodCalls(semanticModel, methodNode, symbolData, result);
-                        ExtractThreadBoundaries(semanticModel, methodNode, symbolData);
-                        ExtractFieldAccesses(semanticModel, methodNode, symbolData, result);
-                        ExtractEventSubscriptions(semanticModel, methodNode, symbolData, result);
-                    }
+                    ProcessSymbol(semanticModel, node, symbol, result);
                 }
             }
 
@@ -104,10 +78,55 @@ namespace Probe.Services.Analysis
             return result;
         }
 
+        private void ProcessSymbol(SemanticModel semanticModel, SyntaxNode declarationNode, ISymbol symbol, ExtractionResult result)
+        {
+            var symbolData = MapToData(symbol, declarationNode);
+            result.Symbols.Add(symbolData);
+
+            if (symbol is INamedTypeSymbol namedType)
+            {
+                if (namedType.BaseType != null && namedType.BaseType.SpecialType != SpecialType.System_Object)
+                {
+                    result.Inheritances.Add(new InheritanceData
+                    {
+                        DerivedId = symbolData.Fqn,
+                        BaseId = namedType.BaseType.ToDisplayString(),
+                        Kind = "extends"
+                    });
+                }
+
+                foreach (var iface in namedType.Interfaces)
+                {
+                    result.Inheritances.Add(new InheritanceData
+                    {
+                        DerivedId = symbolData.Fqn,
+                        BaseId = iface.ToDisplayString(),
+                        Kind = "implements"
+                    });
+                }
+            }
+
+            if (symbol is IMethodSymbol && IsExecutableNode(declarationNode))
+            {
+                ExtractMethodCalls(semanticModel, declarationNode, symbolData, result);
+                ExtractThreadBoundaries(semanticModel, declarationNode, symbolData);
+                ExtractFieldAccesses(semanticModel, declarationNode, symbolData, result);
+                ExtractEventSubscriptions(semanticModel, declarationNode, symbolData, result);
+            }
+        }
+
+        private static bool IsExecutableNode(SyntaxNode node)
+        {
+            return node is MethodDeclarationSyntax
+                || node is ConstructorDeclarationSyntax
+                || node is AccessorDeclarationSyntax
+                || node is LocalFunctionStatementSyntax;
+        }
+
         /// <summary>
         /// Extract method invocation calls.
         /// </summary>
-        private void ExtractMethodCalls(SemanticModel semanticModel, MethodDeclarationSyntax methodNode, SymbolData symbolData, ExtractionResult result)
+        private void ExtractMethodCalls(SemanticModel semanticModel, SyntaxNode methodNode, SymbolData symbolData, ExtractionResult result)
         {
             var invocations = methodNode.DescendantNodes().OfType<InvocationExpressionSyntax>();
             foreach (var invocation in invocations)
@@ -133,7 +152,7 @@ namespace Probe.Services.Analysis
         /// - Application.DoEvents() (re-entrancy hazard)
         /// - lock statements (mutual exclusion)
         /// </summary>
-        private void ExtractThreadBoundaries(SemanticModel semanticModel, MethodDeclarationSyntax methodNode, SymbolData symbolData)
+        private void ExtractThreadBoundaries(SemanticModel semanticModel, SyntaxNode methodNode, SymbolData symbolData)
         {
             // Check for lock statements
             symbolData.HasLock = methodNode.DescendantNodes().OfType<LockStatementSyntax>().Any();
@@ -147,9 +166,16 @@ namespace Probe.Services.Analysis
                     var methodName = calledMethod.Name;
                     var containingTypeFqn = calledMethod.ContainingType?.ToDisplayString() ?? "";
 
-                    // Invoke / BeginInvoke on Control (UI thread dispatch)
+                    // Invoke / BeginInvoke on WinForms controls or WPF dispatcher.
                     if ((methodName == "Invoke" || methodName == "BeginInvoke") &&
-                        IsOrDerivedFrom(calledMethod.ContainingType, "System.Windows.Forms.Control"))
+                        (IsOrDerivedFrom(calledMethod.ContainingType, "System.Windows.Forms.Control") ||
+                         containingTypeFqn == "System.Windows.Threading.Dispatcher"))
+                    {
+                        symbolData.HasUiDispatch = true;
+                    }
+
+                    if ((methodName == "InvokeAsync" || methodName == "BeginInvoke") &&
+                        containingTypeFqn == "System.Windows.Threading.Dispatcher")
                     {
                         symbolData.HasUiDispatch = true;
                     }
@@ -160,6 +186,12 @@ namespace Probe.Services.Analysis
                         (methodName == "StartNew" && typeFqn.StartsWith("System.Threading.Tasks.TaskFactory")))
                     {
                         symbolData.HasTaskSpawn = true;
+                    }
+
+                    if ((methodName == "Post" || methodName == "Send") &&
+                        IsOrDerivedFrom(calledMethod.ContainingType, "System.Threading.SynchronizationContext"))
+                    {
+                        symbolData.HasUiDispatch = true;
                     }
 
                     // BackgroundWorker.RunWorkerAsync
@@ -193,7 +225,9 @@ namespace Probe.Services.Analysis
                     {
                         symbolData.HasTaskSpawn = true;
                     }
-                    if (methodText.EndsWith(".Invoke") || methodText.EndsWith(".BeginInvoke"))
+                    if (methodText.Contains("Dispatcher.Invoke") || methodText.Contains("Dispatcher.BeginInvoke") ||
+                        methodText.Contains("Control.Invoke") || methodText.Contains("Control.BeginInvoke") ||
+                        methodText.Contains("SynchronizationContext.Post") || methodText.Contains("SynchronizationContext.Send"))
                     {
                         symbolData.HasUiDispatch = true;
                     }
@@ -241,7 +275,7 @@ namespace Probe.Services.Analysis
         /// Extract all field and property accesses within a method body.
         /// Tracks read vs write, and whether the access is to an external class.
         /// </summary>
-        private void ExtractFieldAccesses(SemanticModel semanticModel, MethodDeclarationSyntax methodNode, SymbolData symbolData, ExtractionResult result)
+        private void ExtractFieldAccesses(SemanticModel semanticModel, SyntaxNode methodNode, SymbolData symbolData, ExtractionResult result)
         {
             var containingTypeFqn = symbolData.ContainingType;
 
@@ -287,14 +321,14 @@ namespace Probe.Services.Analysis
 
             // Direct assignment: x = value
             if (parent is AssignmentExpressionSyntax assignment && assignment.Left == node)
-                return "write";
+                return assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) ? "write" : "read_write";
 
             // Member access on left of assignment: obj.Field = value
             if (parent is MemberAccessExpressionSyntax memberAccess)
             {
                 var grandParent = memberAccess.Parent;
                 if (grandParent is AssignmentExpressionSyntax outerAssignment && outerAssignment.Left == memberAccess)
-                    return "write";
+                    return outerAssignment.IsKind(SyntaxKind.SimpleAssignmentExpression) ? "write" : "read_write";
             }
 
             // Prefix/postfix increment/decrement: x++ / --x
@@ -303,12 +337,17 @@ namespace Probe.Services.Analysis
                 var kind = parent.Kind();
                 if (kind == SyntaxKind.PostIncrementExpression || kind == SyntaxKind.PostDecrementExpression ||
                     kind == SyntaxKind.PreIncrementExpression || kind == SyntaxKind.PreDecrementExpression)
-                    return "write";
+                    return "read_write";
             }
 
             // ref / out argument
-            if (parent is ArgumentSyntax arg && (arg.RefOrOutKeyword.IsKind(SyntaxKind.RefKeyword) || arg.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)))
-                return "write";
+            if (parent is ArgumentSyntax arg)
+            {
+                if (arg.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword))
+                    return "write";
+                if (arg.RefOrOutKeyword.IsKind(SyntaxKind.RefKeyword))
+                    return "read_write";
+            }
 
             return "read";
         }
@@ -317,7 +356,7 @@ namespace Probe.Services.Analysis
         /// Detect event handler subscriptions (+=) and unsubscriptions (-=).
         /// Records them as special method calls with type "event_subscribe" / "event_unsubscribe".
         /// </summary>
-        private void ExtractEventSubscriptions(SemanticModel semanticModel, MethodDeclarationSyntax methodNode, SymbolData symbolData, ExtractionResult result)
+        private void ExtractEventSubscriptions(SemanticModel semanticModel, SyntaxNode methodNode, SymbolData symbolData, ExtractionResult result)
         {
             var assignments = methodNode.DescendantNodes().OfType<AssignmentExpressionSyntax>();
             foreach (var assignment in assignments)
@@ -421,6 +460,8 @@ namespace Probe.Services.Analysis
                 data.ParameterCount = method.Parameters.Length;
                 data.ReturnType = method.ReturnType.ToDisplayString();
                 data.IsExtensionMethod = method.IsExtensionMethod;
+                if (method.MethodKind == MethodKind.Constructor)
+                    data.Kind = "constructor";
                 
                 // Detect if method takes a callback/delegate to help identify "Callback Hell"
                 data.HasCallback = method.Parameters.Any(p => p.Type.TypeKind == TypeKind.Delegate || p.Type.Name.StartsWith("Action") || p.Type.Name.StartsWith("Func"));
@@ -490,6 +531,12 @@ namespace Probe.Services.Analysis
         public string TargetFqn { get; set; } = "";
         public string AccessKind { get; set; } = "read"; // "read", "write", "read_write"
         public bool IsExternal { get; set; }
+    }
+
+    public class ProjectDependencyData
+    {
+        public string SourceProjectId { get; set; } = "";
+        public string TargetProjectId { get; set; } = "";
     }
 
     public class InheritanceData

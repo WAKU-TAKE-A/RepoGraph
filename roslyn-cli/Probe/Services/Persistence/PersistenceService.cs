@@ -30,6 +30,27 @@ namespace Probe.Services.Persistence
             _logger.LogInformation("Database initialized at {Path}", _connectionString);
         }
 
+        public async Task ResetAnalysisDataAsync()
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = @"
+DELETE FROM project_dependencies;
+DELETE FROM field_accesses;
+DELETE FROM inheritance;
+DELETE FROM method_calls;
+DELETE FROM symbol_relationships;
+DELETE FROM symbols;
+DELETE FROM documents;
+DELETE FROM projects;
+DELETE FROM solutions;";
+            await command.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+        }
+
         public async Task<DateTime?> GetLastRunTimeAsync(string solutionPath)
         {
             using var connection = new SqliteConnection(_connectionString);
@@ -203,6 +224,31 @@ VALUES (@accessor, @target, @kind, @external)";
                 pExternal.Value = access.IsExternal ? 1 : 0;
                 await command.ExecuteNonQueryAsync();
             }
+            await transaction.CommitAsync();
+        }
+
+        public async Task SaveProjectDependenciesAsync(IEnumerable<ProjectDependencyData> dependencies)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+
+            command.CommandText = @"
+INSERT OR IGNORE INTO project_dependencies (source_project_id, target_project_id)
+VALUES (@source, @target)";
+
+            var pSource = command.Parameters.Add("@source", SqliteType.Text);
+            var pTarget = command.Parameters.Add("@target", SqliteType.Text);
+
+            foreach (var dependency in dependencies)
+            {
+                pSource.Value = dependency.SourceProjectId;
+                pTarget.Value = dependency.TargetProjectId;
+                await command.ExecuteNonQueryAsync();
+            }
+
             await transaction.CommitAsync();
         }
 

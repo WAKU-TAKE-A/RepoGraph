@@ -25,9 +25,65 @@ namespace Probe.Services.Graph
         public async Task ExportGraphsAsync(string runId)
         {
             _logger.LogInformation("Exporting graphs for run {RunId}...", runId);
+            await ExportDependencyGraphAsync(runId);
             await ExportInheritanceGraphAsync(runId);
             await ExportCallGraphAsync(runId);
             await ExportFieldAccessGraphAsync(runId);
+        }
+
+        private async Task ExportDependencyGraphAsync(string runId)
+        {
+            var nodes = new List<object>();
+            var links = new List<object>();
+
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+
+            var projectNames = new Dictionary<string, string>();
+            using (var cmdProjects = connection.CreateCommand())
+            {
+                cmdProjects.CommandText = "SELECT id, name, file_path FROM projects";
+                using var readerProjects = await cmdProjects.ExecuteReaderAsync();
+                while (await readerProjects.ReadAsync())
+                {
+                    var projectId = readerProjects.GetString(0);
+                    var name = readerProjects.GetString(1);
+                    var filePath = readerProjects.GetString(2);
+                    projectNames[projectId] = name;
+
+                    nodes.Add(new
+                    {
+                        id = name,
+                        kind = "project",
+                        file = filePath,
+                        project = name
+                    });
+                }
+            }
+
+            using (var cmdDeps = connection.CreateCommand())
+            {
+                cmdDeps.CommandText = "SELECT source_project_id, target_project_id FROM project_dependencies";
+                using var readerDeps = await cmdDeps.ExecuteReaderAsync();
+                while (await readerDeps.ReadAsync())
+                {
+                    var sourceProjectId = readerDeps.GetString(0);
+                    var targetProjectId = readerDeps.GetString(1);
+
+                    if (projectNames.TryGetValue(sourceProjectId, out var sourceName) &&
+                        projectNames.TryGetValue(targetProjectId, out var targetName))
+                    {
+                        links.Add(new
+                        {
+                            source = sourceName,
+                            target = targetName,
+                            type = "depends_on"
+                        });
+                    }
+                }
+            }
+
+            await WriteJsonAsync("dependency_graph.json", "dependency", runId, nodes, links);
         }
 
         private async Task ExportInheritanceGraphAsync(string runId)
@@ -39,7 +95,11 @@ namespace Probe.Services.Graph
             await connection.OpenAsync();
 
             using var cmdNodes = connection.CreateCommand();
-            cmdNodes.CommandText = "SELECT id, fqn, kind FROM symbols";
+            cmdNodes.CommandText = @"
+SELECT s.id, s.fqn, s.kind, COALESCE(d.file_path, ''), COALESCE(p.name, '')
+FROM symbols s
+LEFT JOIN documents d ON d.id = s.document_id
+LEFT JOIN projects p ON p.id = s.project_id";
             using var readerNodes = await cmdNodes.ExecuteReaderAsync();
             var symbolIdToFqn = new Dictionary<string, string>();
             while (await readerNodes.ReadAsync())
@@ -47,11 +107,13 @@ namespace Probe.Services.Graph
                 var id = readerNodes.GetString(0);
                 var fqn = readerNodes.GetString(1);
                 var kind = readerNodes.GetString(2);
+                var filePath = readerNodes.GetString(3);
+                var projectName = readerNodes.GetString(4);
                 symbolIdToFqn[id] = fqn;
                 
                 if (kind == "class" || kind == "interface")
                 {
-                    nodes.Add(new { id = fqn, kind = kind });
+                    nodes.Add(new { id = fqn, kind = kind, file = filePath, project = projectName });
                 }
             }
 
@@ -88,11 +150,14 @@ namespace Probe.Services.Graph
             // Include thread boundary flags in node data
             using var cmdNodes = connection.CreateCommand();
             cmdNodes.CommandText = @"
-SELECT id, fqn, kind, 
+SELECT s.id, s.fqn, s.kind, 
        has_ui_dispatch, has_task_spawn, has_background_worker, has_do_events, has_lock,
-       has_callback, is_async
-FROM symbols 
-WHERE kind = 'method' OR kind = 'constructor'";
+       has_callback, is_async, has_thread_start, has_blocking_wait,
+       COALESCE(d.file_path, ''), COALESCE(p.name, '')
+FROM symbols s
+LEFT JOIN documents d ON d.id = s.document_id
+LEFT JOIN projects p ON p.id = s.project_id
+WHERE s.kind = 'method' OR s.kind = 'constructor'";
             using var readerNodes = await cmdNodes.ExecuteReaderAsync();
             var symbolIdToFqn = new Dictionary<string, string>();
             while (await readerNodes.ReadAsync())
@@ -107,19 +172,27 @@ WHERE kind = 'method' OR kind = 'constructor'";
                 var hasLock = readerNodes.GetInt32(7) == 1;
                 var hasCallback = readerNodes.GetInt32(8) == 1;
                 var isAsync = readerNodes.GetInt32(9) == 1;
+                var hasThreadStart = readerNodes.GetInt32(10) == 1;
+                var hasBlockingWait = readerNodes.GetInt32(11) == 1;
+                var filePath = readerNodes.GetString(12);
+                var projectName = readerNodes.GetString(13);
 
                 symbolIdToFqn[id] = fqn;
                 nodes.Add(new
                 {
                     id = fqn,
                     kind = kind,
+                    file = filePath,
+                    project = projectName,
                     has_ui_dispatch = hasUiDispatch,
                     has_task_spawn = hasTaskSpawn,
                     has_background_worker = hasBgWorker,
                     has_do_events = hasDoEvents,
                     has_lock = hasLock,
                     has_callback = hasCallback,
-                    is_async = isAsync
+                    is_async = isAsync,
+                    has_thread_start = hasThreadStart,
+                    has_blocking_wait = hasBlockingWait
                 });
             }
 

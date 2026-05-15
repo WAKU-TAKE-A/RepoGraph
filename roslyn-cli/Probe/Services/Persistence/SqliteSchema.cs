@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS projects (
     FOREIGN KEY (analysis_run_id) REFERENCES analysis_runs(id)
 );
 
+CREATE TABLE IF NOT EXISTS project_dependencies (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_project_id TEXT NOT NULL,
+    target_project_id TEXT NOT NULL,
+    UNIQUE(source_project_id, target_project_id),
+    FOREIGN KEY (source_project_id) REFERENCES projects(id),
+    FOREIGN KEY (target_project_id) REFERENCES projects(id)
+);
+
 CREATE TABLE IF NOT EXISTS documents (
     id           TEXT PRIMARY KEY,
     project_id   TEXT NOT NULL,
@@ -153,6 +162,8 @@ CREATE INDEX IF NOT EXISTS idx_inheritance_derived ON inheritance(derived_id);
 CREATE INDEX IF NOT EXISTS idx_inheritance_base    ON inheritance(base_id);
 CREATE INDEX IF NOT EXISTS idx_documents_project   ON documents(project_id);
 CREATE INDEX IF NOT EXISTS idx_projects_solution   ON projects(solution_id);
+CREATE INDEX IF NOT EXISTS idx_project_deps_source ON project_dependencies(source_project_id);
+CREATE INDEX IF NOT EXISTS idx_project_deps_target ON project_dependencies(target_project_id);
 CREATE INDEX IF NOT EXISTS idx_field_accesses_accessor ON field_accesses(accessor_fqn);
 CREATE INDEX IF NOT EXISTS idx_field_accesses_target   ON field_accesses(target_fqn);
 CREATE INDEX IF NOT EXISTS idx_field_accesses_external ON field_accesses(is_external);

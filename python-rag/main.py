@@ -6,9 +6,6 @@ from sqlalchemy.orm import sessionmaker
 from loguru import logger
 from models import Base, Symbol
 from graph import GraphLoader
-from summarize import Summarizer
-from index import SentenceTransformerProvider, FaissIndexer
-from retrieval import Retriever
 from hotspots import HotspotScorer
 import networkx as nx
 import json
@@ -42,9 +39,12 @@ def doctor(workspace: str = typer.Option(None, "--workspace", "-w", help="Overri
 @app.command()
 def build_index(workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory")):
     """Build embedding + FAISS index."""
+    from summarize import Summarizer
+    from index import SentenceTransformerProvider, FaissIndexer
+
     config = load_config()
     db_path = os.path.join(workspace, "output", "repository.db") if workspace else config["database"]["path"]
-    graphs_dir = os.path.join(workspace, "graphs") if workspace else config["graphs"]["directory"]
+    graphs_dir = os.path.join(workspace, "output", "graphs") if workspace else config["graphs"]["directory"]
     out_dir = os.path.join(workspace, "output", "embeddings") if workspace else config["output"]["embeddings_dir"]
     model_name = config["embedding"]["model"]
     batch_size = config["embedding"]["batch_size"]
@@ -74,8 +74,11 @@ def build_index(workspace: str = typer.Option(None, "--workspace", "-w", help="O
 @app.command()
 def query(text: str, workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory")):
     """Semantic + graph-aware query."""
+    from index import SentenceTransformerProvider
+    from retrieval import Retriever
+
     config = load_config()
-    graphs_dir = os.path.join(workspace, "graphs") if workspace else config["graphs"]["directory"]
+    graphs_dir = os.path.join(workspace, "output", "graphs") if workspace else config["graphs"]["directory"]
     out_dir = os.path.join(workspace, "output", "embeddings") if workspace else config["output"]["embeddings_dir"]
     model_name = config["embedding"]["model"]
     device = config["embedding"]["device"]
@@ -108,7 +111,7 @@ def hotspots(workspace: str = typer.Option(None, "--workspace", "-w", help="Over
     """Compute and display hotspot rankings."""
     config = load_config()
     db_path = os.path.join(workspace, "output", "repository.db") if workspace else config["database"]["path"]
-    graphs_dir = os.path.join(workspace, "graphs") if workspace else config["graphs"]["directory"]
+    graphs_dir = os.path.join(workspace, "output", "graphs") if workspace else config["graphs"]["directory"]
     reports_dir = os.path.join(workspace, "output", "reports") if workspace else os.path.join(config["output"]["directory"], "reports")
 
     engine = create_engine(f"sqlite:///{db_path}")
