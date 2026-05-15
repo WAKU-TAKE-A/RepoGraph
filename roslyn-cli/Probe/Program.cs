@@ -128,6 +128,11 @@ namespace Probe
                         {
                             await persistence.SaveInheritancesAsync(result.Inheritances);
                         }
+
+                        if (result.FieldAccesses.Any())
+                        {
+                            await persistence.SaveFieldAccessesAsync(result.FieldAccesses);
+                        }
                     }
                 }
 

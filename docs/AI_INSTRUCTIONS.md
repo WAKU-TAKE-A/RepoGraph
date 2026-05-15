@@ -21,47 +21,39 @@ Extracts raw semantic metrics and graph topologies from a C# solution/project.
     $env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
     & "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" run --project C:\tmp\RepoGraph\roslyn-cli\Probe\Probe.csproj -- scan <TARGET_SLN_OR_CSPROJ> --output C:\tmp\RepoGraph\analysis_workspace
     ```
-*   **Outputs**: `repository.db` (SQLite), `call_graph.json`, `inheritance_graph.json`
+*   **Outputs**: 
+    *   `repository.db` (SQLite): Now includes `field_accesses`, `is_volatile`, and thread boundary flags.
+    *   `call_graph.json`: Nodes enriched with `has_ui_dispatch`, `has_lock`, etc.
+    *   `inheritance_graph.json`
+    *   `field_access_graph.json`: [NEW v0.9.1.0] Maps every field read/write access.
 
 ### 3.2. Relay (Python RAG)
 Consumes Probe's outputs, scores hotspots, and performs graph-aware semantic retrieval.
 *   **Directory**: `C:\tmp\RepoGraph\python-rag`
-*   **Setup Index (Run this after Probe)**:
-    ```powershell
-    cd C:\tmp\RepoGraph\python-rag
-    ..\.venv\Scripts\python.exe main.py build-index
-    ```
-*   **Query Codebase**:
-    ```powershell
-    cd C:\tmp\RepoGraph\python-rag
-    ..\.venv\Scripts\python.exe main.py query "Your natural language question here"
-    ```
-    *Note: Read the standard output of this command to understand caller/callee contexts.*
 *   **Generate Hotspots**:
     ```powershell
     cd C:\tmp\RepoGraph\python-rag
     ..\.venv\Scripts\python.exe main.py hotspots
     ```
-    *Note: Read `C:\tmp\RepoGraph\analysis_workspace\output\reports\hotspots.md` to find the most complex and highly-coupled classes/methods.*
+    *   **New in v0.9.1.0**: `hotspots.md` now categorizes warnings:
+        1.  **Threading Hazards**: Methods mixing UI thread dispatch with background work.
+        2.  **External Spaghetti**: Fields written by methods in multiple different classes (High risk).
+        3.  **Internal Spaghetti**: Complex state management within a single class.
 
 ## 4. Standard Operating Procedures
 
-### Scenario A: "Analyze this new repository"
-1. Run **Probe** (scan command) on the target `.sln` or `.csproj`.
-2. Run **Relay** `build-index` command to generate embeddings.
-3. Run **Relay** `hotspots` command.
-4. Read the top 10 items in `hotspots.md` using `view_file`.
-5. Report the architectural overview and top hotspots to the user.
+### Scenario A: "Analyze threading or state issues"
+1. Run **Probe** and **Relay hotspots**.
+2. Read `hotspots.md`. Focus on **🔴 Shared Mutable State (External Spaghetti)** to find cross-class coupling.
+3. Identify fields with high `External Writers` count.
+4. Use the collapsible details in `hotspots.md` to see exactly which methods are writing to that field.
 
-### Scenario B: "How does feature X work?" or "Where is Y implemented?"
-1. Do NOT use `grep_search` initially.
-2. Run **Relay** `query "feature X"` command.
-3. Analyze the returned symbols and their **Graph Context** (Calls, Called by, Inherits).
-4. If you need the exact source code of a specific method found in the query, use `view_file` on the file path identified.
-5. Provide a precise, graph-aware answer to the user.
+### Scenario B: "How does feature X work?"
+1. Run **Relay** `query "feature X"`.
+2. Analyze the returned symbols and their **Graph Context**.
+3. Check for `is_volatile` or `has_lock` flags to understand concurrency design.
 
-### Scenario C: "Suggest refactoring for this module"
-1. Query the module using **Relay** `query`.
-2. Look closely at the `fan_in` and `fan_out` metrics in the output.
-3. If a method has high `fan_out` (calls many things) and high `LOC`, suggest extracting methods.
-4. If a method has high `fan_in` (called by many things), warn the user about blast radius before suggesting changes.
+### Scenario C: "Identify refactoring candidates"
+1. Look for classes with high **Danger Score** (Fan-In × LOC) in `hotspots.md`.
+2. Check for "God Classes" (Manager, Station, Controller).
+3. Suggest encapsulating fields that have many external writers into private fields with thread-safe accessors.

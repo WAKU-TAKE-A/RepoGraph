@@ -1,0 +1,19 @@
+# RepoGraph RAG Config Example
+database:
+  path: ./output/repository.db
+
+graphs:
+  directory: ./graphs
+
+output:
+  directory: ./output
+  embeddings_dir: ./output/embeddings
+
+embedding:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  batch_size: 64
+  device: cpu
+
+retrieval:
+  top_k: 20
+  graph_expansion_depth: 2

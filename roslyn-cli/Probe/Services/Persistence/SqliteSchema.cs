@@ -72,12 +72,18 @@ CREATE TABLE IF NOT EXISTS symbols (
     is_generic       INTEGER NOT NULL DEFAULT 0,
     is_extension_method INTEGER NOT NULL DEFAULT 0,
     is_disposable    INTEGER NOT NULL DEFAULT 0,
+    is_volatile      INTEGER NOT NULL DEFAULT 0,
     line_start       INTEGER,
     line_end         INTEGER,
     loc              INTEGER,
     parameter_count  INTEGER,
     return_type      TEXT,
     has_callback     INTEGER NOT NULL DEFAULT 0,
+    has_ui_dispatch      INTEGER NOT NULL DEFAULT 0,
+    has_task_spawn       INTEGER NOT NULL DEFAULT 0,
+    has_background_worker INTEGER NOT NULL DEFAULT 0,
+    has_do_events        INTEGER NOT NULL DEFAULT 0,
+    has_lock             INTEGER NOT NULL DEFAULT 0,
     UNIQUE (fqn),
     FOREIGN KEY (document_id) REFERENCES documents(id),
     FOREIGN KEY (project_id) REFERENCES projects(id)
@@ -97,6 +103,7 @@ CREATE TABLE IF NOT EXISTS method_calls (
     caller_id  TEXT NOT NULL,
     callee_id  TEXT NOT NULL,
     call_count INTEGER NOT NULL DEFAULT 1,
+    call_type  TEXT NOT NULL DEFAULT 'calls',
     FOREIGN KEY (caller_id) REFERENCES symbols(id),
     FOREIGN KEY (callee_id) REFERENCES symbols(id)
 );
@@ -108,6 +115,15 @@ CREATE TABLE IF NOT EXISTS inheritance (
     kind       TEXT NOT NULL,
     FOREIGN KEY (derived_id) REFERENCES symbols(id),
     FOREIGN KEY (base_id) REFERENCES symbols(id)
+);
+
+CREATE TABLE IF NOT EXISTS field_accesses (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    accessor_fqn  TEXT NOT NULL,
+    target_fqn    TEXT NOT NULL,
+    access_kind   TEXT NOT NULL,
+    is_external   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(accessor_fqn, target_fqn, access_kind)
 );
 
 CREATE TABLE IF NOT EXISTS diagnostics (
@@ -130,10 +146,14 @@ CREATE INDEX IF NOT EXISTS idx_symbols_project    ON symbols(project_id);
 CREATE INDEX IF NOT EXISTS idx_symbols_namespace  ON symbols(namespace);
 CREATE INDEX IF NOT EXISTS idx_method_calls_caller ON method_calls(caller_id);
 CREATE INDEX IF NOT EXISTS idx_method_calls_callee ON method_calls(callee_id);
+CREATE INDEX IF NOT EXISTS idx_method_calls_type   ON method_calls(call_type);
 CREATE INDEX IF NOT EXISTS idx_inheritance_derived ON inheritance(derived_id);
 CREATE INDEX IF NOT EXISTS idx_inheritance_base    ON inheritance(base_id);
 CREATE INDEX IF NOT EXISTS idx_documents_project   ON documents(project_id);
 CREATE INDEX IF NOT EXISTS idx_projects_solution   ON projects(solution_id);
+CREATE INDEX IF NOT EXISTS idx_field_accesses_accessor ON field_accesses(accessor_fqn);
+CREATE INDEX IF NOT EXISTS idx_field_accesses_target   ON field_accesses(target_fqn);
+CREATE INDEX IF NOT EXISTS idx_field_accesses_external ON field_accesses(is_external);
 ";
     }
 }

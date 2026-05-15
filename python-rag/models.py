@@ -55,9 +55,24 @@ class Symbol(Base):
     is_generic = Column(Integer)
     is_extension_method = Column(Integer)
     is_disposable = Column(Integer)
+    is_volatile = Column(Integer)
     line_start = Column(Integer)
     line_end = Column(Integer)
     loc = Column(Integer)
     parameter_count = Column(Integer)
     return_type = Column(String)
     has_callback = Column(Integer)
+    # Thread boundary flags
+    has_ui_dispatch = Column(Integer)
+    has_task_spawn = Column(Integer)
+    has_background_worker = Column(Integer)
+    has_do_events = Column(Integer)
+    has_lock = Column(Integer)
+
+class FieldAccess(Base):
+    __tablename__ = "field_accesses"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    accessor_fqn = Column(String, nullable=False)
+    target_fqn = Column(String, nullable=False)
+    access_kind = Column(String, nullable=False)  # 'read', 'write', 'read_write'
+    is_external = Column(Integer, nullable=False, default=0)

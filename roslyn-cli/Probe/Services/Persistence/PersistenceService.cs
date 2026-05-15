@@ -65,13 +65,17 @@ WHERE solution_path = @path AND status = 'completed'";
 INSERT OR IGNORE INTO symbols (
     id, document_id, project_id, fqn, name, kind, namespace, containing_type,
     accessibility, is_static, is_abstract, is_sealed, is_async, is_partial,
-    is_generic, is_extension_method, is_disposable, line_start, line_end,
-    loc, parameter_count, return_type, has_callback
+    is_generic, is_extension_method, is_disposable, is_volatile,
+    line_start, line_end, loc, parameter_count, return_type,
+    has_callback, has_ui_dispatch, has_task_spawn, has_background_worker,
+    has_do_events, has_lock
 ) VALUES (
     @id, @docId, @projId, @fqn, @name, @kind, @ns, @parent,
     @acc, @static, @abstract, @sealed, @async, @partial,
-    @generic, @ext, @disposable, @lstart, @lend,
-    @loc, @pcount, @ret, @hascb
+    @generic, @ext, @disposable, @volatile,
+    @lstart, @lend, @loc, @pcount, @ret,
+    @hascb, @uidisp, @taskspawn, @bgworker,
+    @doevents, @haslock
 )";
             
             var pId = command.Parameters.Add("@id", SqliteType.Text);
@@ -91,23 +95,29 @@ INSERT OR IGNORE INTO symbols (
             var pGeneric = command.Parameters.Add("@generic", SqliteType.Integer);
             var pExt = command.Parameters.Add("@ext", SqliteType.Integer);
             var pDisp = command.Parameters.Add("@disposable", SqliteType.Integer);
+            var pVolatile = command.Parameters.Add("@volatile", SqliteType.Integer);
             var pLstart = command.Parameters.Add("@lstart", SqliteType.Integer);
             var pLend = command.Parameters.Add("@lend", SqliteType.Integer);
             var pLoc = command.Parameters.Add("@loc", SqliteType.Integer);
             var pCount = command.Parameters.Add("@pcount", SqliteType.Integer);
             var pRet = command.Parameters.Add("@ret", SqliteType.Text);
             var pHasCb = command.Parameters.Add("@hascb", SqliteType.Integer);
+            var pUiDisp = command.Parameters.Add("@uidisp", SqliteType.Integer);
+            var pTaskSpawn = command.Parameters.Add("@taskspawn", SqliteType.Integer);
+            var pBgWorker = command.Parameters.Add("@bgworker", SqliteType.Integer);
+            var pDoEvents = command.Parameters.Add("@doevents", SqliteType.Integer);
+            var pHasLock = command.Parameters.Add("@haslock", SqliteType.Integer);
 
             foreach (var data in symbols)
             {
                 pId.Value = data.Id;
-                pDocId.Value = (object)data.DocumentId ?? DBNull.Value;
+                pDocId.Value = (object?)data.DocumentId ?? DBNull.Value;
                 pProjId.Value = data.ProjectId;
                 pFqn.Value = data.Fqn;
                 pName.Value = data.Name;
                 pKind.Value = data.Kind;
-                pNs.Value = (object)data.Namespace ?? DBNull.Value;
-                pParent.Value = (object)data.ContainingType ?? DBNull.Value;
+                pNs.Value = (object?)data.Namespace ?? DBNull.Value;
+                pParent.Value = (object?)data.ContainingType ?? DBNull.Value;
                 pAcc.Value = data.Accessibility;
                 pStatic.Value = data.IsStatic ? 1 : 0;
                 pAbstract.Value = data.IsAbstract ? 1 : 0;
@@ -117,12 +127,18 @@ INSERT OR IGNORE INTO symbols (
                 pGeneric.Value = data.IsGeneric ? 1 : 0;
                 pExt.Value = data.IsExtensionMethod ? 1 : 0;
                 pDisp.Value = data.IsDisposable ? 1 : 0;
+                pVolatile.Value = data.IsVolatile ? 1 : 0;
                 pLstart.Value = data.LineStart;
                 pLend.Value = data.LineEnd;
                 pLoc.Value = data.Loc;
                 pCount.Value = data.ParameterCount;
-                pRet.Value = (object)data.ReturnType ?? DBNull.Value;
+                pRet.Value = (object?)data.ReturnType ?? DBNull.Value;
                 pHasCb.Value = data.HasCallback ? 1 : 0;
+                pUiDisp.Value = data.HasUiDispatch ? 1 : 0;
+                pTaskSpawn.Value = data.HasTaskSpawn ? 1 : 0;
+                pBgWorker.Value = data.HasBackgroundWorker ? 1 : 0;
+                pDoEvents.Value = data.HasDoEvents ? 1 : 0;
+                pHasLock.Value = data.HasLock ? 1 : 0;
                 await command.ExecuteNonQueryAsync();
             }
             await transaction.CommitAsync();
@@ -137,20 +153,50 @@ INSERT OR IGNORE INTO symbols (
             command.Transaction = transaction;
 
             command.CommandText = @"
-INSERT INTO method_calls (caller_id, callee_id, call_count)
-SELECT s1.id, s2.id, @count
+INSERT INTO method_calls (caller_id, callee_id, call_count, call_type)
+SELECT s1.id, s2.id, @count, @callType
 FROM symbols s1, symbols s2
 WHERE s1.fqn = @callerFqn AND s2.fqn = @calleeFqn";
 
             var pCaller = command.Parameters.Add("@callerFqn", SqliteType.Text);
             var pCallee = command.Parameters.Add("@calleeFqn", SqliteType.Text);
             var pCount = command.Parameters.Add("@count", SqliteType.Integer);
+            var pCallType = command.Parameters.Add("@callType", SqliteType.Text);
 
             foreach (var call in methodCalls)
             {
                 pCaller.Value = call.CallerId;
                 pCallee.Value = call.CalleeId;
                 pCount.Value = call.CallCount;
+                pCallType.Value = call.CallType;
+                await command.ExecuteNonQueryAsync();
+            }
+            await transaction.CommitAsync();
+        }
+
+        public async Task SaveFieldAccessesAsync(IEnumerable<FieldAccessData> fieldAccesses)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+
+            command.CommandText = @"
+INSERT OR IGNORE INTO field_accesses (accessor_fqn, target_fqn, access_kind, is_external)
+VALUES (@accessor, @target, @kind, @external)";
+
+            var pAccessor = command.Parameters.Add("@accessor", SqliteType.Text);
+            var pTarget = command.Parameters.Add("@target", SqliteType.Text);
+            var pKind = command.Parameters.Add("@kind", SqliteType.Text);
+            var pExternal = command.Parameters.Add("@external", SqliteType.Integer);
+
+            foreach (var access in fieldAccesses)
+            {
+                pAccessor.Value = access.AccessorFqn;
+                pTarget.Value = access.TargetFqn;
+                pKind.Value = access.AccessKind;
+                pExternal.Value = access.IsExternal ? 1 : 0;
                 await command.ExecuteNonQueryAsync();
             }
             await transaction.CommitAsync();

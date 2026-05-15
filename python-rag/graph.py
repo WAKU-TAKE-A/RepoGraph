@@ -10,11 +10,13 @@ class GraphLoader:
         self.call_graph = nx.DiGraph()
         self.inheritance_graph = nx.DiGraph()
         self.dependency_graph = nx.DiGraph()
+        self.field_access_graph = nx.DiGraph()
 
     def load_all(self):
         self.call_graph = self._load_graph("call_graph.json")
         self.inheritance_graph = self._load_graph("inheritance_graph.json")
         self.dependency_graph = self._load_graph("dependency_graph.json")
+        self.field_access_graph = self._load_graph("field_access_graph.json")
         logger.info("Graph loading completed.")
 
     def _load_graph(self, filename: str) -> nx.DiGraph:
