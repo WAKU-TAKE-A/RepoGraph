@@ -38,11 +38,11 @@ namespace Probe.Services.Analysis
                 }
 
                 var workspace = MSBuildWorkspace.Create();
-                
-                workspace.WorkspaceFailed += (sender, e) =>
+
+                _ = workspace.RegisterWorkspaceFailedHandler(e =>
                 {
                     _logger.LogWarning("Workspace diagnostic: {Message}", e.Diagnostic.Message);
-                };
+                }, null);
 
                 _logger.LogInformation("Loading target: {Path}", targetPath);
                 if (targetPath.EndsWith(".sln"))
