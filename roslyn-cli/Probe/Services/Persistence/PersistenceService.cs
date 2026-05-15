@@ -68,14 +68,14 @@ INSERT OR IGNORE INTO symbols (
     is_generic, is_extension_method, is_disposable, is_volatile,
     line_start, line_end, loc, parameter_count, return_type,
     has_callback, has_ui_dispatch, has_task_spawn, has_background_worker,
-    has_do_events, has_lock
+    has_do_events, has_lock, has_thread_start, has_blocking_wait
 ) VALUES (
     @id, @docId, @projId, @fqn, @name, @kind, @ns, @parent,
     @acc, @static, @abstract, @sealed, @async, @partial,
     @generic, @ext, @disposable, @volatile,
     @lstart, @lend, @loc, @pcount, @ret,
     @hascb, @uidisp, @taskspawn, @bgworker,
-    @doevents, @haslock
+    @doevents, @haslock, @threadstart, @blockingwait
 )";
             
             var pId = command.Parameters.Add("@id", SqliteType.Text);
@@ -107,6 +107,8 @@ INSERT OR IGNORE INTO symbols (
             var pBgWorker = command.Parameters.Add("@bgworker", SqliteType.Integer);
             var pDoEvents = command.Parameters.Add("@doevents", SqliteType.Integer);
             var pHasLock = command.Parameters.Add("@haslock", SqliteType.Integer);
+            var pThreadStart = command.Parameters.Add("@threadstart", SqliteType.Integer);
+            var pBlockingWait = command.Parameters.Add("@blockingwait", SqliteType.Integer);
 
             foreach (var data in symbols)
             {
@@ -139,6 +141,8 @@ INSERT OR IGNORE INTO symbols (
                 pBgWorker.Value = data.HasBackgroundWorker ? 1 : 0;
                 pDoEvents.Value = data.HasDoEvents ? 1 : 0;
                 pHasLock.Value = data.HasLock ? 1 : 0;
+                pThreadStart.Value = data.HasThreadStart ? 1 : 0;
+                pBlockingWait.Value = data.HasBlockingWait ? 1 : 0;
                 await command.ExecuteNonQueryAsync();
             }
             await transaction.CommitAsync();

@@ -40,6 +40,7 @@ class Symbol(Base):
     __tablename__ = "symbols"
     id = Column(String, primary_key=True)
     document_id = Column(String, ForeignKey("documents.id"))
+    document = relationship("Document")
     project_id = Column(String, ForeignKey("projects.id"))
     fqn = Column(String, unique=True)
     name = Column(String)
@@ -68,6 +69,8 @@ class Symbol(Base):
     has_background_worker = Column(Integer)
     has_do_events = Column(Integer)
     has_lock = Column(Integer)
+    has_thread_start = Column(Integer)
+    has_blocking_wait = Column(Integer)
 
 class FieldAccess(Base):
     __tablename__ = "field_accesses"

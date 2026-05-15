@@ -155,8 +155,9 @@ namespace Probe.Services.Analysis
                     }
 
                     // Task.Run / Task.Factory.StartNew (background thread spawn)
-                    if ((methodName == "Run" && containingTypeFqn == "System.Threading.Tasks.Task") ||
-                        (methodName == "StartNew" && containingTypeFqn == "System.Threading.Tasks.TaskFactory"))
+                    var typeFqn = calledMethod.ContainingType?.ToDisplayString() ?? "";
+                    if ((methodName == "Run" && typeFqn.StartsWith("System.Threading.Tasks.Task")) ||
+                        (methodName == "StartNew" && typeFqn.StartsWith("System.Threading.Tasks.TaskFactory")))
                     {
                         symbolData.HasTaskSpawn = true;
                     }
@@ -170,12 +171,51 @@ namespace Probe.Services.Analysis
 
                     // Application.DoEvents()
                     if (methodName == "DoEvents" &&
-                        containingTypeFqn == "System.Windows.Forms.Application")
+                        typeFqn.StartsWith("System.Windows.Forms.Application"))
                     {
                         symbolData.HasDoEvents = true;
                     }
+
+                    // Thread, ThreadPool, Parallel
+                    if (methodName == "Start" && typeFqn == "System.Threading.Thread") symbolData.HasThreadStart = true;
+                    if (methodName == "QueueUserWorkItem" && typeFqn == "System.Threading.ThreadPool") symbolData.HasThreadStart = true;
+                    if ((methodName == "For" || methodName == "ForEach") && typeFqn == "System.Threading.Tasks.Parallel") symbolData.HasThreadStart = true;
+
+                    // Blocking waits
+                    if (methodName == "Wait" && typeFqn.StartsWith("System.Threading.Tasks.Task")) symbolData.HasBlockingWait = true;
+                    if (methodName == "Join" && typeFqn == "System.Threading.Thread") symbolData.HasBlockingWait = true;
+                }
+                else
+                {
+                    // Fallback: If semantic resolution failed (e.g. missing SDK), check syntactically
+                    var methodText = invocation.Expression.ToString();
+                    if (methodText.Contains("Task.Run") || methodText.Contains("TaskFactory.StartNew") || (methodText.Contains("Task<") && methodText.Contains(".Run")))
+                    {
+                        symbolData.HasTaskSpawn = true;
+                    }
+                    if (methodText.EndsWith(".Invoke") || methodText.EndsWith(".BeginInvoke"))
+                    {
+                        symbolData.HasUiDispatch = true;
+                    }
+                    if (methodText.Contains("Application.DoEvents"))
+                    {
+                        symbolData.HasDoEvents = true;
+                    }
+                    if (methodText.Contains("ThreadPool.QueueUserWorkItem") || methodText.Contains("Parallel.For"))
+                    {
+                        symbolData.HasThreadStart = true;
+                    }
+                    if (methodText.EndsWith(".Wait") || methodText.EndsWith(".Join"))
+                    {
+                        symbolData.HasBlockingWait = true;
+                    }
                 }
             }
+
+            // Global text fallback for the whole method body to catch properties like .Result and object creations like new Thread
+            var fullText = methodNode.ToString();
+            if (fullText.Contains(".Result")) symbolData.HasBlockingWait = true;
+            if (fullText.Contains("new Thread(")) symbolData.HasThreadStart = true;
 
             // Also check for BackgroundWorker field declarations used in the method (e.g., _bgw.IsBusy)
             var memberAccesses = methodNode.DescendantNodes().OfType<MemberAccessExpressionSyntax>();
@@ -432,6 +472,8 @@ namespace Probe.Services.Analysis
         public bool HasBackgroundWorker { get; set; }
         public bool HasDoEvents { get; set; }
         public bool HasLock { get; set; }
+        public bool HasThreadStart { get; set; }
+        public bool HasBlockingWait { get; set; }
     }
 
     public class MethodCallData

@@ -20,10 +20,10 @@ def load_config():
         return yaml.safe_load(f)
 
 @app.command()
-def doctor():
+def doctor(workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory")):
     """Verify environment and inputs."""
     config = load_config()
-    db_path = config["database"]["path"]
+    db_path = os.path.join(workspace, "output", "repository.db") if workspace else config["database"]["path"]
     
     if not os.path.exists(db_path):
         logger.error(f"Database not found at {db_path}")
@@ -40,12 +40,12 @@ def doctor():
     logger.info("Environment check completed successfully.")
 
 @app.command()
-def build_index():
+def build_index(workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory")):
     """Build embedding + FAISS index."""
     config = load_config()
-    db_path = config["database"]["path"]
-    graphs_dir = config["graphs"]["directory"]
-    out_dir = config["output"]["embeddings_dir"]
+    db_path = os.path.join(workspace, "output", "repository.db") if workspace else config["database"]["path"]
+    graphs_dir = os.path.join(workspace, "graphs") if workspace else config["graphs"]["directory"]
+    out_dir = os.path.join(workspace, "output", "embeddings") if workspace else config["output"]["embeddings_dir"]
     model_name = config["embedding"]["model"]
     batch_size = config["embedding"]["batch_size"]
     device = config["embedding"]["device"]
@@ -72,11 +72,11 @@ def build_index():
     logger.info("Index build completed successfully.")
 
 @app.command()
-def query(text: str):
+def query(text: str, workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory")):
     """Semantic + graph-aware query."""
     config = load_config()
-    graphs_dir = config["graphs"]["directory"]
-    out_dir = config["output"]["embeddings_dir"]
+    graphs_dir = os.path.join(workspace, "graphs") if workspace else config["graphs"]["directory"]
+    out_dir = os.path.join(workspace, "output", "embeddings") if workspace else config["output"]["embeddings_dir"]
     model_name = config["embedding"]["model"]
     device = config["embedding"]["device"]
     top_k = config["retrieval"]["top_k"]
@@ -104,12 +104,12 @@ def query(text: str):
                 print(f"  - {ctx}")
 
 @app.command()
-def hotspots():
+def hotspots(workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory")):
     """Compute and display hotspot rankings."""
     config = load_config()
-    db_path = config["database"]["path"]
-    graphs_dir = config["graphs"]["directory"]
-    reports_dir = os.path.join(config["output"]["directory"], "reports")
+    db_path = os.path.join(workspace, "output", "repository.db") if workspace else config["database"]["path"]
+    graphs_dir = os.path.join(workspace, "graphs") if workspace else config["graphs"]["directory"]
+    reports_dir = os.path.join(workspace, "output", "reports") if workspace else os.path.join(config["output"]["directory"], "reports")
 
     engine = create_engine(f"sqlite:///{db_path}")
     Session = sessionmaker(bind=engine)

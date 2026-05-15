@@ -58,6 +58,7 @@ class HotspotScorer:
 
         for item in symbols_with_metrics:
             s = item["symbol"]
+            file_name = os.path.basename(s.document.file_path) if s.document and s.document.file_path else ""
             m = {
                 "fan_in": item["fan_in"],
                 "fan_out": item["fan_out"],
@@ -70,6 +71,8 @@ class HotspotScorer:
             raw_metrics.append({
                 "fqn": s.fqn,
                 "kind": s.kind,
+                "file_name": file_name,
+                "line_start": s.line_start or 0,
                 "metrics": m,
                 "has_ui_dispatch": bool(s.has_ui_dispatch),
                 "has_task_spawn": bool(s.has_task_spawn),
@@ -126,6 +129,8 @@ class HotspotScorer:
             scored_results.append({
                 "fqn": r["fqn"],
                 "kind": r["kind"],
+                "file_name": r["file_name"],
+                "line_start": r["line_start"],
                 "score": round(score, 4),
                 "danger_score": danger_score,
                 "is_anti_pattern": is_anti_pattern,
@@ -245,7 +250,8 @@ class HotspotScorer:
                 f.write("|------|--------------|--------------|-----|--------|\n")
                 for i, h in enumerate(anti_patterns[:20]):
                     m = h["metrics"]
-                    f.write(f"| {i+1} | {h['danger_score']} | `{h['fqn']}` | {m['loc']} | {m['fan_in']} |\n")
+                    link = f"[`{h['fqn']}`]({h['file_name']}#L{h['line_start']})" if h['file_name'] else f"`{h['fqn']}`"
+                    f.write(f"| {i+1} | {h['danger_score']} | {link} | {m['loc']} | {m['fan_in']} |\n")
                 f.write("\n---\n\n")
 
             # --- Threading Hazard Warnings ---
@@ -258,7 +264,8 @@ class HotspotScorer:
                 f.write("|---|--------------|-------------|------------|----------|----------|------|\n")
                 for i, h in enumerate(threading_hazards[:30]):
                     tf = h["thread_flags"]
-                    f.write(f"| {i+1} | `{h['fqn']}` | {'✅' if tf['has_ui_dispatch'] else '—'} | {'✅' if tf['has_task_spawn'] else '—'} | {'✅' if tf['has_background_worker'] else '—'} | {'⚠️' if tf['has_do_events'] else '—'} | {'🔒' if tf['has_lock'] else '—'} |\n")
+                    link = f"[`{h['fqn']}`]({h['file_name']}#L{h['line_start']})" if h['file_name'] else f"`{h['fqn']}`"
+                    f.write(f"| {i+1} | {link} | {'✅' if tf['has_ui_dispatch'] else '—'} | {'✅' if tf['has_task_spawn'] else '—'} | {'✅' if tf['has_background_worker'] else '—'} | {'⚠️' if tf['has_do_events'] else '—'} | {'🔒' if tf['has_lock'] else '—'} |\n")
                 f.write("\n---\n\n")
 
             # --- Shared Mutable State Warnings ---
@@ -303,7 +310,8 @@ class HotspotScorer:
             
             for i, h in enumerate(hotspots[:50]): # Top 50
                 m = h["metrics"]
-                f.write(f"| {i+1} | {h['score']:.4f} | {h['kind']} | `{h['fqn']}` | {m['loc']} | {m['fan_in']} | {m['fan_out']} |\n")
+                link = f"[`{h['fqn']}`]({h['file_name']}#L{h['line_start']})" if h['file_name'] else f"`{h['fqn']}`"
+                f.write(f"| {i+1} | {h['score']:.4f} | {h['kind']} | {link} | {m['loc']} | {m['fan_in']} | {m['fan_out']} |\n")
 
         logger.info(f"Generated hotspot reports: {json_path}, {md_path}")
         if shared_state:
