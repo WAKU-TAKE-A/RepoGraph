@@ -6,6 +6,14 @@ from models import Symbol, FieldAccess, Project
 from graph import GraphLoader
 from loguru import logger
 
+def _categorize_writer(fqn: str) -> str:
+    fqn_lower = fqn.lower()
+    if any(kw in fqn_lower for kw in [".ctor", "_load", "initui", "initialize", "_shown", "setparamdefault"]):
+        return "init"
+    if any(kw in fqn_lower for kw in ["_click", "_checkedchanged", "_selectedindexchanged", "_scroll", "_propvaluechanged", "_domainchanged", "_formclosed", "_formclosing"]):
+        return "event"
+    return "runtime"
+
 class HotspotScorer:
     def __init__(self, session: Session, graph_loader: GraphLoader, output_dir: str):
         self.session = session
@@ -182,28 +190,28 @@ class HotspotScorer:
             if fa.target_fqn not in owned_targets:
                 continue
 
+            if fa.target_fqn not in target_writers:
+                target_writers[fa.target_fqn] = {
+                    "writers": set(),
+                    "external_writers": set(),
+                    "internal_writers": set(),
+                    "readers": set(),
+                    "init_writers": set(),
+                    "event_writers": set(),
+                    "runtime_writers": set(),
+                }
+
             if fa.access_kind in ("write", "read_write"):
-                if fa.target_fqn not in target_writers:
-                    target_writers[fa.target_fqn] = {
-                        "writers": set(),
-                        "external_writers": set(),
-                        "internal_writers": set(),
-                        "readers": set(),
-                    }
                 target_writers[fa.target_fqn]["writers"].add(fa.accessor_fqn)
+                category = _categorize_writer(fa.accessor_fqn)
+                target_writers[fa.target_fqn][f"{category}_writers"].add(fa.accessor_fqn)
+
                 if fa.is_external:
                     target_writers[fa.target_fqn]["external_writers"].add(fa.accessor_fqn)
                 else:
                     target_writers[fa.target_fqn]["internal_writers"].add(fa.accessor_fqn)
 
             if fa.access_kind in ("read", "read_write"):
-                if fa.target_fqn not in target_writers:
-                    target_writers[fa.target_fqn] = {
-                        "writers": set(),
-                        "external_writers": set(),
-                        "internal_writers": set(),
-                        "readers": set(),
-                    }
                 target_writers[fa.target_fqn]["readers"].add(fa.accessor_fqn)
 
         # Find fields with multiple writers (dangerous shared state)
@@ -212,6 +220,9 @@ class HotspotScorer:
             writer_count = len(info["writers"])
             external_writer_count = len(info["external_writers"])
             reader_count = len(info["readers"])
+            init_count = len(info["init_writers"])
+            event_count = len(info["event_writers"])
+            runtime_count = len(info["runtime_writers"])
 
             # Classify the spaghetti type
             spaghetti_type = "none"
@@ -224,19 +235,28 @@ class HotspotScorer:
                     spaghetti_type = "internal"  # Multiple methods in same class
 
             if writer_count >= 2:
+                risk_score = (runtime_count * 10) + (event_count * 3) + (init_count * 0.1)
+                
                 shared_state.append({
                     "target_fqn": target_fqn,
                     "writer_count": writer_count,
                     "external_writer_count": external_writer_count,
                     "internal_writer_count": len(info["internal_writers"]),
                     "reader_count": reader_count,
+                    "init_writer_count": init_count,
+                    "event_writer_count": event_count,
+                    "runtime_writer_count": runtime_count,
+                    "risk_score": risk_score,
                     "spaghetti_type": spaghetti_type,
                     "writers": sorted(info["writers"]),
                     "external_writers": sorted(info["external_writers"]),
+                    "init_writers": sorted(info["init_writers"]),
+                    "event_writers": sorted(info["event_writers"]),
+                    "runtime_writers": sorted(info["runtime_writers"]),
                 })
 
-        # Sort by external_writer_count descending (most dangerous first), then total writer_count
-        shared_state.sort(key=lambda x: (x["external_writer_count"], x["writer_count"]), reverse=True)
+        # Sort by risk_score descending
+        shared_state.sort(key=lambda x: (x["risk_score"], x["writer_count"]), reverse=True)
         return shared_state
 
     def generate_reports(self):
@@ -289,37 +309,44 @@ class HotspotScorer:
 
             # --- Shared Mutable State Warnings ---
             if shared_state:
-                external_spaghetti = [s for s in shared_state if s["spaghetti_type"] in ("external", "mixed")]
-                internal_spaghetti = [s for s in shared_state if s["spaghetti_type"] == "internal"]
+                # High Risk: Has Runtime or Event writers
+                high_risk = [s for s in shared_state if s["runtime_writer_count"] > 0 or s["event_writer_count"] > 0]
+                # Low Risk: Only Init writers
+                low_risk = [s for s in shared_state if s["runtime_writer_count"] == 0 and s["event_writer_count"] == 0]
 
-                if external_spaghetti:
-                    f.write("## 🔴 Shared Mutable State (Cross-Class — External Spaghetti)\n\n")
+                if high_risk:
+                    f.write("## 🔴 Shared Mutable State (Runtime/Event — High Risk)\n\n")
                     f.write("> [!CAUTION]\n")
-                    f.write("> The following fields are **written by methods in multiple different classes**. This is the most dangerous form of implicit coupling.\n\n")
-                    f.write("| # | Field | External Writers | Internal Writers | Readers | Type |\n")
-                    f.write("|---|-------|-----------------|------------------|---------|------|\n")
-                    for i, s in enumerate(external_spaghetti[:30]):
-                        f.write(f"| {i+1} | `{s['target_fqn']}` | {s['external_writer_count']} | {s['internal_writer_count']} | {s['reader_count']} | {s['spaghetti_type']} |\n")
+                    f.write("> The following fields are mutated during **runtime execution or user events** across multiple methods. This indicates dangerous implicit coupling and race condition risks.\n\n")
+                    f.write("| # | Field | Risk Score | Runtime | Event | Init | Readers | Type |\n")
+                    f.write("|---|-------|------------|---------|-------|------|---------|------|\n")
+                    for i, s in enumerate(high_risk[:40]):
+                        f.write(f"| {i+1} | `{s['target_fqn']}` | {s['risk_score']:.1f} | {s['runtime_writer_count']} | {s['event_writer_count']} | {s['init_writer_count']} | {s['reader_count']} | {s['spaghetti_type']} |\n")
                     f.write("\n")
 
-                    # Show top external spaghetti details
-                    for s in external_spaghetti[:5]:
+                    # Show details for top high-risk
+                    for s in high_risk[:5]:
                         f.write(f"<details><summary>📝 {s['target_fqn']}</summary>\n\n")
-                        f.write("**External writers:**\n")
-                        for w in s["external_writers"]:
-                            f.write(f"- `{w}`\n")
+                        if s["runtime_writers"]:
+                            f.write("**Runtime writers:**\n")
+                            for w in s["runtime_writers"]:
+                                f.write(f"- `{w}`\n")
+                        if s["event_writers"]:
+                            f.write("**Event writers:**\n")
+                            for w in s["event_writers"]:
+                                f.write(f"- `{w}`\n")
                         f.write("\n</details>\n\n")
 
                     f.write("---\n\n")
 
-                if internal_spaghetti:
-                    f.write("## ⚠️ Shared Mutable State (Same-Class — Internal Spaghetti)\n\n")
-                    f.write("> [!WARNING]\n")
-                    f.write("> The following fields are written by multiple methods within the same class. High counts indicate complex internal state management.\n\n")
-                    f.write("| # | Field | Writers | Readers |\n")
-                    f.write("|---|-------|---------|---------|\n")
-                    for i, s in enumerate(internal_spaghetti[:30]):
-                        f.write(f"| {i+1} | `{s['target_fqn']}` | {s['writer_count']} | {s['reader_count']} |\n")
+                if low_risk:
+                    f.write("## ℹ️ Shared Mutable State (Init-only — Low Risk Wiring)\n\n")
+                    f.write("> [!NOTE]\n")
+                    f.write("> The following fields have multiple writers, but **only during initialization** (e.g., `_Load`, `InitUI`). These are likely just UI data binding or configuration wiring.\n\n")
+                    f.write("| # | Field | Init Writers | Readers | Type |\n")
+                    f.write("|---|-------|--------------|---------|------|\n")
+                    for i, s in enumerate(low_risk[:20]):
+                        f.write(f"| {i+1} | `{s['target_fqn']}` | {s['init_writer_count']} | {s['reader_count']} | {s['spaghetti_type']} |\n")
                     f.write("\n---\n\n")
 
             # --- General Hotspots ---
@@ -334,6 +361,6 @@ class HotspotScorer:
 
         logger.info(f"Generated hotspot reports: {json_path}, {md_path}")
         if shared_state:
-            external_count = len([s for s in shared_state if s["spaghetti_type"] in ("external", "mixed")])
-            internal_count = len([s for s in shared_state if s["spaghetti_type"] == "internal"])
-            logger.info(f"Shared mutable state: {external_count} external spaghetti, {internal_count} internal spaghetti")
+            high_risk_count = len([s for s in shared_state if s["runtime_writer_count"] > 0 or s["event_writer_count"] > 0])
+            low_risk_count = len([s for s in shared_state if s["runtime_writer_count"] == 0 and s["event_writer_count"] == 0])
+            logger.info(f"Shared mutable state: {high_risk_count} high risk (runtime/event), {low_risk_count} low risk (init-only)")

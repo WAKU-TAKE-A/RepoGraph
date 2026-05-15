@@ -45,7 +45,7 @@ namespace Probe.Services.Analysis
                 }, null);
 
                 _logger.LogInformation("Loading target: {Path}", targetPath);
-                if (targetPath.EndsWith(".sln"))
+                if (targetPath.EndsWith(".sln") || targetPath.EndsWith(".slnx"))
                 {
                     await workspace.OpenSolutionAsync(targetPath);
                 }
@@ -55,7 +55,7 @@ namespace Probe.Services.Analysis
                 }
                 else
                 {
-                    throw new ArgumentException("Unsupported file type. Use .sln or .csproj");
+                    throw new ArgumentException("Unsupported file type. Use .sln, .slnx or .csproj");
                 }
                 
                 return workspace;

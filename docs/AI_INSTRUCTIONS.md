@@ -25,7 +25,8 @@ Extracts raw semantic metrics and graph topologies from a C# solution/project.
     *   `repository.db` (SQLite): Now includes `field_accesses`, `is_volatile`, and thread boundary flags.
     *   `call_graph.json`: Nodes enriched with `has_ui_dispatch`, `has_lock`, etc.
     *   `inheritance_graph.json`
-    *   `field_access_graph.json`: [NEW v0.9.1.0] Maps every field read/write access.
+    *   `field_access_graph.json`: Maps every field read/write access.
+    *   **Hotspots Logic (v0.9.2.0)**: Shared state writers are now categorized into **Init**, **Event**, and **Runtime** contexts.
 
 ### 3.2. Relay (Python RAG)
 Consumes Probe's outputs, scores hotspots, and performs graph-aware semantic retrieval.
@@ -35,18 +36,19 @@ Consumes Probe's outputs, scores hotspots, and performs graph-aware semantic ret
     cd C:\tmp\RepoGraph\python-rag
     ..\.venv\Scripts\python.exe main.py hotspots
     ```
-    *   **New in v0.9.1.0**: `hotspots.md` now categorizes warnings:
-        1.  **Threading Hazards**: Methods mixing UI thread dispatch with background work.
-        2.  **External Spaghetti**: Fields written by methods in multiple different classes (High risk).
-        3.  **Internal Spaghetti**: Complex state management within a single class.
+    *   **New in v0.9.2.0**: `hotspots.md` segregates Shared Mutable State by risk:
+        1.  **🔴 High Risk (Runtime/Event)**: Fields mutated during business logic (`MyRun`, `Execute`) or UI events (`_Click`). Priority 1.
+        2.  **ℹ️ Low Risk (Init-only)**: Fields mutated only during initialization (`_Load`, `.ctor`). Likely wiring.
+        3.  **Risk Score**: Weighted scoring system: `Runtime (10x)`, `Event (3x)`, `Init (0.1x)`.
+        4.  **Threading Hazards**: Methods mixing UI thread dispatch with background work.
 
 ## 4. Standard Operating Procedures
 
 ### Scenario A: "Analyze threading or state issues"
 1. Run **Probe** and **Relay hotspots**.
-2. Read `hotspots.md`. Focus on **🔴 Shared Mutable State (External Spaghetti)** to find cross-class coupling.
-3. Identify fields with high `External Writers` count.
-4. Use the collapsible details in `hotspots.md` to see exactly which methods are writing to that field.
+2. Read `hotspots.md`. Focus on **🔴 Shared Mutable State (Runtime/Event — High Risk)** to find cross-class coupling.
+3. Identify fields with high **Risk Score** (weighted towards runtime mutations).
+4. Use the collapsible details in `hotspots.md` to see exactly which **Runtime writers** are mutating that field.
 
 ### Scenario B: "How does feature X work?"
 1. Run **Relay** `query "feature X"`.

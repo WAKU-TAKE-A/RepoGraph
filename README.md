@@ -1,4 +1,4 @@
-# RepoGraph (v0.9.1.0)
+# RepoGraph (v0.9.2.0)
 
 **RepoGraph** は、巨大な C# レガシーコードベースを、AIエージェント（Claude Code, Antigravity, Cursor 等）が自律的に探索・分析・リファクタリング可能にするための「AIエージェント専用ツールチェーン」です。
 
