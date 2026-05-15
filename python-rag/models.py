@@ -60,3 +60,4 @@ class Symbol(Base):
     loc = Column(Integer)
     parameter_count = Column(Integer)
     return_type = Column(String)
+    has_callback = Column(Integer)

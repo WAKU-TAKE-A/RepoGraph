@@ -1,10 +1,15 @@
 # RepoGraph .gitignore
 
+SettingsOfThisPC.txt
+
 # User Requested
 _sample/
 
 # Analysis Workspace (Output)
 analysis_workspace/
+full_analysis/
+test_analysis/
+test_small/
 
 # Python
 .venv/

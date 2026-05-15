@@ -2,15 +2,26 @@ exclude:
   directories:
     - bin
     - obj
+    - lib
     - packages
     - node_modules
     - TestResults
+    - datasources    
   filePatterns:
     - "*.Designer.cs"
     - "*.g.cs"
     - "*.generated.cs"
     - "*.AssemblyInfo.cs"
     - "*.AssemblyAttributes.cs"
+    - "*.png"
+    - "*.bmp"
+    - "*.ico"
+    - "*.png"
+    - "*.dll"
+    - "*.user"
+    - "*.datasource"
+    - "*.bak"
+    - "*.resx"
   paths:
     - "**/Service References/**"
     - "**/Connected Services/**"

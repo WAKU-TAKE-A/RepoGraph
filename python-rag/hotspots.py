@@ -30,28 +30,47 @@ class HotspotScorer:
         raw_metrics = []
         
         # 1. Gather raw metrics
+        symbols_with_metrics = []
         for symbol in symbols:
             fan_in = self.graph.call_graph.in_degree(symbol.fqn) if symbol.fqn in self.graph.call_graph else 0
             fan_out = self.graph.call_graph.out_degree(symbol.fqn) if symbol.fqn in self.graph.call_graph else 0
-            
-            # TODO: dependency_graph extraction not yet implemented in Probe, default to 0 for now
             static_coupling = self.graph.dependency_graph.degree(symbol.fqn) if symbol.fqn in self.graph.dependency_graph else 0
             
-            loc = symbol.loc or 0
-            parameter_count = symbol.parameter_count or 0
-            async_flag = 1 if symbol.is_async else 0
+            symbols_with_metrics.append({
+                "symbol": symbol,
+                "fan_in": fan_in,
+                "fan_out": fan_out,
+                "static_coupling": static_coupling
+            })
+
+        # 1b. Aggregate member Fan-In into Classes
+        class_metrics = {}
+        for item in symbols_with_metrics:
+            s = item["symbol"]
+            if s.kind == "class":
+                class_metrics[s.fqn] = item
+
+        for item in symbols_with_metrics:
+            s = item["symbol"]
+            if s.containing_type and s.containing_type in class_metrics:
+                # Add member's usage to the class's total usage
+                class_metrics[s.containing_type]["fan_in"] += item["fan_in"]
+
+        for item in symbols_with_metrics:
+            s = item["symbol"]
+            m = {
+                "fan_in": item["fan_in"],
+                "fan_out": item["fan_out"],
+                "loc": s.loc or 0,
+                "parameter_count": s.parameter_count or 0,
+                "async_flag": 1 if s.is_async else 0,
+                "static_coupling": item["static_coupling"]
+            }
             
             raw_metrics.append({
-                "fqn": symbol.fqn,
-                "kind": symbol.kind,
-                "metrics": {
-                    "fan_in": fan_in,
-                    "fan_out": fan_out,
-                    "loc": loc,
-                    "parameter_count": parameter_count,
-                    "async_flag": async_flag,
-                    "static_coupling": static_coupling
-                }
+                "fqn": s.fqn,
+                "kind": s.kind,
+                "metrics": m
             })
             
         if not raw_metrics:
@@ -80,10 +99,23 @@ class HotspotScorer:
                 self.weights["static_coupling"] * (m["static_coupling"] / max_static)
             )
             
+            danger_score = m["fan_in"] * m["loc"]
+            
+            is_anti_pattern = False
+            if r["kind"] == "class":
+                # Flag based on combined danger score or extreme size
+                if danger_score > 500 or m["loc"] > 2000:
+                    name_lower = r["fqn"].lower()
+                    # Focus on "Manager", "Station", "Controller", etc.
+                    if any(kw in name_lower for kw in ["manager", "controller", "global", "station", "base"]):
+                        is_anti_pattern = True
+
             scored_results.append({
                 "fqn": r["fqn"],
                 "kind": r["kind"],
                 "score": round(score, 4),
+                "danger_score": danger_score,
+                "is_anti_pattern": is_anti_pattern,
                 "metrics": m
             })
             
@@ -106,6 +138,20 @@ class HotspotScorer:
             
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("# Repository Hotspots\n\n")
+            
+            anti_patterns = [h for h in hotspots if h["is_anti_pattern"]]
+            if anti_patterns:
+                f.write("## ⚠️ Anti-Pattern Warnings (God Class / Service Locator)\n\n")
+                f.write("> [!WARNING]\n")
+                f.write("> The following classes have unusually high 'Danger Scores' (Fan-In × LOC) and names suggesting they might be managing global state or acting as God Classes.\n\n")
+                f.write("| Rank | Danger Score | Symbol (FQN) | LOC | Fan-in |\n")
+                f.write("|------|--------------|--------------|-----|--------|\n")
+                for i, h in enumerate(anti_patterns[:20]):
+                    m = h["metrics"]
+                    f.write(f"| {i+1} | {h['danger_score']} | `{h['fqn']}` | {m['loc']} | {m['fan_in']} |\n")
+                f.write("\n---\n\n")
+
+            f.write("## Top 50 Hotspots (General)\n\n")
             f.write("| Rank | Score | Kind | Symbol (FQN) | LOC | Fan-in | Fan-out |\n")
             f.write("|------|-------|------|--------------|-----|--------|---------|\n")
             

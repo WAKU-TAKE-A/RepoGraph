@@ -143,11 +143,14 @@ namespace Probe.Services.Analysis
 
             if (symbol is IMethodSymbol method)
             {
-                data.IsAsync = method.IsAsync;
+                data.IsAsync = method.IsAsync || method.ReturnType.ToDisplayString().StartsWith("System.Threading.Tasks.Task");
                 data.IsGeneric = method.IsGenericMethod;
                 data.ParameterCount = method.Parameters.Length;
                 data.ReturnType = method.ReturnType.ToDisplayString();
                 data.IsExtensionMethod = method.IsExtensionMethod;
+                
+                // Future-proofing: Detect if method takes a callback/delegate to help identify "Callback Hell"
+                data.HasCallback = method.Parameters.Any(p => p.Type.TypeKind == TypeKind.Delegate || p.Type.Name.StartsWith("Action") || p.Type.Name.StartsWith("Func"));
             }
             else if (symbol is INamedTypeSymbol type)
             {
@@ -184,6 +187,7 @@ namespace Probe.Services.Analysis
         public int Loc { get; set; }
         public int ParameterCount { get; set; }
         public string ReturnType { get; set; }
+        public bool HasCallback { get; set; }
     }
 
     public class MethodCallData

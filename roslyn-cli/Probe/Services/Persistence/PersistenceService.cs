@@ -30,6 +30,29 @@ namespace Probe.Services.Persistence
             _logger.LogInformation("Database initialized at {Path}", _connectionString);
         }
 
+        public async Task<DateTime?> GetLastRunTimeAsync(string solutionPath)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT MAX(started_at)
+FROM analysis_runs
+WHERE solution_path = @path AND status = 'completed'";
+            command.Parameters.AddWithValue("@path", solutionPath);
+
+            var result = await command.ExecuteScalarAsync();
+            if (result != null && result != DBNull.Value)
+            {
+                if (DateTime.TryParse(result.ToString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var dateTime))
+                {
+                    return dateTime;
+                }
+            }
+            return null;
+        }
+
         public async Task SaveSymbolsAsync(IEnumerable<SymbolData> symbols)
         {
             using var connection = new SqliteConnection(_connectionString);
@@ -43,12 +66,12 @@ INSERT OR IGNORE INTO symbols (
     id, document_id, project_id, fqn, name, kind, namespace, containing_type,
     accessibility, is_static, is_abstract, is_sealed, is_async, is_partial,
     is_generic, is_extension_method, is_disposable, line_start, line_end,
-    loc, parameter_count, return_type
+    loc, parameter_count, return_type, has_callback
 ) VALUES (
     @id, @docId, @projId, @fqn, @name, @kind, @ns, @parent,
     @acc, @static, @abstract, @sealed, @async, @partial,
     @generic, @ext, @disposable, @lstart, @lend,
-    @loc, @pcount, @ret
+    @loc, @pcount, @ret, @hascb
 )";
             
             var pId = command.Parameters.Add("@id", SqliteType.Text);
@@ -73,6 +96,7 @@ INSERT OR IGNORE INTO symbols (
             var pLoc = command.Parameters.Add("@loc", SqliteType.Integer);
             var pCount = command.Parameters.Add("@pcount", SqliteType.Integer);
             var pRet = command.Parameters.Add("@ret", SqliteType.Text);
+            var pHasCb = command.Parameters.Add("@hascb", SqliteType.Integer);
 
             foreach (var data in symbols)
             {
@@ -98,6 +122,7 @@ INSERT OR IGNORE INTO symbols (
                 pLoc.Value = data.Loc;
                 pCount.Value = data.ParameterCount;
                 pRet.Value = (object)data.ReturnType ?? DBNull.Value;
+                pHasCb.Value = data.HasCallback ? 1 : 0;
                 await command.ExecuteNonQueryAsync();
             }
             await transaction.CommitAsync();
@@ -204,6 +229,22 @@ VALUES (@id, @path, @start, 'running')";
             command.Parameters.AddWithValue("@id", id);
             command.Parameters.AddWithValue("@path", path);
             command.Parameters.AddWithValue("@start", DateTime.UtcNow.ToString("O"));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        public async Task UpdateAnalysisRunStatusAsync(string id, string status)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+UPDATE analysis_runs 
+SET status = @status, completed_at = @completed 
+WHERE id = @id";
+            command.Parameters.AddWithValue("@id", id);
+            command.Parameters.AddWithValue("@status", status);
+            command.Parameters.AddWithValue("@completed", DateTime.UtcNow.ToString("O"));
             await command.ExecuteNonQueryAsync();
         }
 

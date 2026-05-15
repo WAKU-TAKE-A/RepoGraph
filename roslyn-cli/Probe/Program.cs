@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Probe.Services.Analysis;
 using Probe.Services.Persistence;
 using Probe.Services.Graph;
+using Probe.Config;
 using System.Linq;
 using System.Collections.Generic;
 
@@ -20,6 +21,7 @@ namespace Probe
                 .AddLogging(builder => builder.AddConsole())
                 .AddSingleton<WorkspaceLoader>()
                 .AddSingleton<SymbolExtractor>()
+                .AddSingleton<ConfigLoader>()
                 .BuildServiceProvider();
 
             var rootCommand = new RootCommand("RepoGraph - Roslyn Repository Analyzer");
@@ -27,10 +29,11 @@ namespace Probe
             var scanCommand = new Command("scan", "Analyze a C# solution or project")
             {
                 new Argument<string>("path", "Path to .sln or .csproj file"),
-                new Option<string>("--output", () => "./analysis_workspace", "Output directory")
+                new Option<string>("--output", () => "./analysis_workspace", "Output directory"),
+                new Option<string>("--mode", () => "full", "Scan mode: full or incremental")
             };
 
-            scanCommand.SetHandler(async (string path, string output) =>
+            scanCommand.SetHandler(async (string path, string output, string mode) =>
             {
                 var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
                 var loader = serviceProvider.GetRequiredService<WorkspaceLoader>();
@@ -42,6 +45,12 @@ namespace Probe
                 var persistence = new PersistenceService(dbPath, serviceProvider.GetRequiredService<ILogger<PersistenceService>>());
                 await persistence.InitializeAsync();
 
+                var lastRunTime = mode == "incremental" ? await persistence.GetLastRunTimeAsync(path) : null;
+                if (lastRunTime.HasValue)
+                {
+                    logger.LogInformation("Incremental scan enabled. Last run time: {LastRun}", lastRunTime.Value);
+                }
+
                 var runId = Guid.NewGuid().ToString();
                 await persistence.SaveAnalysisRunAsync(runId, path);
 
@@ -50,6 +59,10 @@ namespace Probe
                 var solutionId = workspace.CurrentSolution.Id.Id.ToString();
                 await persistence.SaveSolutionAsync(solutionId, runId, path, Path.GetFileName(path));
 
+                var configLoader = serviceProvider.GetRequiredService<ConfigLoader>();
+                var config = configLoader.Load(path);
+                var filterService = new FilterService(config, serviceProvider.GetRequiredService<ILogger<FilterService>>());
+
                 var projects = path.EndsWith(".csproj") 
                     ? workspace.CurrentSolution.Projects.Where(p => p.FilePath?.EndsWith(".csproj") == true).ToList()
                     : workspace.CurrentSolution.Projects.ToList();
@@ -57,6 +70,12 @@ namespace Probe
 
                 foreach (var project in projects)
                 {
+                    if (filterService.ShouldExcludeFile(project.FilePath ?? project.Name))
+                    {
+                        logger.LogInformation("Skipping excluded project: {Name}", project.Name);
+                        continue;
+                    }
+
                     logger.LogInformation("Analyzing project: {Name}", project.Name);
                     var projectId = project.Id.Id.ToString();
                     await persistence.SaveProjectAsync(projectId, solutionId, runId, project.Name, project.FilePath ?? project.Name);
@@ -66,6 +85,21 @@ namespace Probe
 
                     foreach (var document in project.Documents)
                     {
+                        if (filterService.ShouldExcludeFile(document.FilePath ?? document.Name))
+                        {
+                            continue;
+                        }
+
+                        if (lastRunTime.HasValue && document.FilePath != null && File.Exists(document.FilePath))
+                        {
+                            var lastWriteTime = File.GetLastWriteTimeUtc(document.FilePath);
+                            if (lastWriteTime <= lastRunTime.Value)
+                            {
+                                logger.LogDebug("Skipping unchanged file: {Name}", document.Name);
+                                continue;
+                            }
+                        }
+
                         var documentId = document.Id.Id.ToString();
                         await persistence.SaveDocumentAsync(documentId, projectId, document.FilePath ?? document.Name, document.Name);
 
@@ -102,9 +136,10 @@ namespace Probe
                 var graphService = new GraphService(dbPath, graphOutputDir, serviceProvider.GetRequiredService<ILogger<GraphService>>());
                 await graphService.ExportGraphsAsync(runId);
 
+                await persistence.UpdateAnalysisRunStatusAsync(runId, "completed");
                 logger.LogInformation("Analysis completed.");
 
-            }, scanCommand.Arguments[0] as Argument<string>, scanCommand.Options[0] as Option<string>);
+            }, scanCommand.Arguments[0] as Argument<string>, scanCommand.Options[0] as Option<string>, scanCommand.Options[1] as Option<string>);
 
             rootCommand.AddCommand(scanCommand);
 

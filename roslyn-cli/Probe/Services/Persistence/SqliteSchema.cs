@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS symbols (
     loc              INTEGER,
     parameter_count  INTEGER,
     return_type      TEXT,
+    has_callback     INTEGER NOT NULL DEFAULT 0,
     UNIQUE (fqn),
     FOREIGN KEY (document_id) REFERENCES documents(id),
     FOREIGN KEY (project_id) REFERENCES projects(id)
