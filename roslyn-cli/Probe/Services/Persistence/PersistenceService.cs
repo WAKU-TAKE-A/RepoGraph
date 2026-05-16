@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Probe.Services.Analysis;
 
@@ -26,8 +27,57 @@ namespace Probe.Services.Persistence
             using var command = connection.CreateCommand();
             command.CommandText = SqliteSchema.Tables + SqliteSchema.Indexes;
             await command.ExecuteNonQueryAsync();
+
+            await EnsureSchemaAsync(connection);
             
             _logger.LogInformation("Database initialized at {Path}", _connectionString);
+        }
+
+        private async Task EnsureSchemaAsync(SqliteConnection connection)
+        {
+            await EnsureColumnsAsync(connection, "symbols", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["has_ui_dispatch"] = "ALTER TABLE symbols ADD COLUMN has_ui_dispatch INTEGER NOT NULL DEFAULT 0",
+                ["has_task_spawn"] = "ALTER TABLE symbols ADD COLUMN has_task_spawn INTEGER NOT NULL DEFAULT 0",
+                ["has_background_worker"] = "ALTER TABLE symbols ADD COLUMN has_background_worker INTEGER NOT NULL DEFAULT 0",
+                ["has_do_events"] = "ALTER TABLE symbols ADD COLUMN has_do_events INTEGER NOT NULL DEFAULT 0",
+                ["has_lock"] = "ALTER TABLE symbols ADD COLUMN has_lock INTEGER NOT NULL DEFAULT 0",
+                ["has_thread_start"] = "ALTER TABLE symbols ADD COLUMN has_thread_start INTEGER NOT NULL DEFAULT 0",
+                ["has_blocking_wait"] = "ALTER TABLE symbols ADD COLUMN has_blocking_wait INTEGER NOT NULL DEFAULT 0",
+                ["fan_in"] = "ALTER TABLE symbols ADD COLUMN fan_in INTEGER NOT NULL DEFAULT 0"
+            });
+        }
+
+        private static async Task EnsureColumnsAsync(SqliteConnection connection, string tableName, IReadOnlyDictionary<string, string> migrations)
+        {
+            var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            using (var pragma = connection.CreateCommand())
+            {
+                pragma.CommandText = $"PRAGMA table_info({tableName})";
+                using var reader = await pragma.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    existingColumns.Add(reader.GetString(1));
+                }
+            }
+
+            var missingColumns = migrations
+                .Where(kvp => !existingColumns.Contains(kvp.Key))
+                .Select(kvp => kvp.Value)
+                .ToList();
+
+            if (missingColumns.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var migration in missingColumns)
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = migration;
+                await command.ExecuteNonQueryAsync();
+            }
         }
 
         public async Task ResetAnalysisDataAsync()
@@ -47,6 +97,40 @@ DELETE FROM symbols;
 DELETE FROM documents;
 DELETE FROM projects;
 DELETE FROM solutions;";
+            await command.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+        }
+
+        public async Task ResetProjectAnalysisDataAsync(string projectId)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = @"
+DELETE FROM project_dependencies WHERE source_project_id = @projectId;
+
+DELETE FROM method_calls
+WHERE caller_id IN (SELECT id FROM symbols WHERE project_id = @projectId)
+   OR callee_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
+
+DELETE FROM inheritance
+WHERE derived_id IN (SELECT id FROM symbols WHERE project_id = @projectId)
+   OR base_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
+
+DELETE FROM symbol_relationships
+WHERE source_id IN (SELECT id FROM symbols WHERE project_id = @projectId)
+   OR target_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
+
+DELETE FROM field_accesses
+WHERE accessor_fqn IN (SELECT fqn FROM symbols WHERE project_id = @projectId)
+   OR target_fqn IN (SELECT fqn FROM symbols WHERE project_id = @projectId);
+
+DELETE FROM symbols WHERE project_id = @projectId;
+DELETE FROM documents WHERE project_id = @projectId;
+DELETE FROM projects WHERE id = @projectId;";
+            command.Parameters.AddWithValue("@projectId", projectId);
             await command.ExecuteNonQueryAsync();
             await transaction.CommitAsync();
         }
@@ -83,7 +167,7 @@ WHERE solution_path = @path AND status = 'completed'";
             command.Transaction = transaction;
             
             command.CommandText = @"
-INSERT OR IGNORE INTO symbols (
+INSERT INTO symbols (
     id, document_id, project_id, fqn, name, kind, namespace, containing_type,
     accessibility, is_static, is_abstract, is_sealed, is_async, is_partial,
     is_generic, is_extension_method, is_disposable, is_volatile,
@@ -97,7 +181,47 @@ INSERT OR IGNORE INTO symbols (
     @lstart, @lend, @loc, @pcount, @ret,
     @hascb, @uidisp, @taskspawn, @bgworker,
     @doevents, @haslock, @threadstart, @blockingwait, @fanin
-)";
+)
+ON CONFLICT(fqn) DO UPDATE SET
+    id = excluded.id,
+    document_id = COALESCE(symbols.document_id, excluded.document_id),
+    project_id = excluded.project_id,
+    name = excluded.name,
+    kind = excluded.kind,
+    namespace = COALESCE(symbols.namespace, excluded.namespace),
+    containing_type = COALESCE(symbols.containing_type, excluded.containing_type),
+    accessibility = excluded.accessibility,
+    is_static = CASE WHEN symbols.is_static = 1 OR excluded.is_static = 1 THEN 1 ELSE 0 END,
+    is_abstract = CASE WHEN symbols.is_abstract = 1 OR excluded.is_abstract = 1 THEN 1 ELSE 0 END,
+    is_sealed = CASE WHEN symbols.is_sealed = 1 OR excluded.is_sealed = 1 THEN 1 ELSE 0 END,
+    is_async = CASE WHEN symbols.is_async = 1 OR excluded.is_async = 1 THEN 1 ELSE 0 END,
+    is_partial = CASE WHEN symbols.is_partial = 1 OR excluded.is_partial = 1 THEN 1 ELSE 0 END,
+    is_generic = CASE WHEN symbols.is_generic = 1 OR excluded.is_generic = 1 THEN 1 ELSE 0 END,
+    is_extension_method = CASE WHEN symbols.is_extension_method = 1 OR excluded.is_extension_method = 1 THEN 1 ELSE 0 END,
+    is_disposable = CASE WHEN symbols.is_disposable = 1 OR excluded.is_disposable = 1 THEN 1 ELSE 0 END,
+    is_volatile = CASE WHEN symbols.is_volatile = 1 OR excluded.is_volatile = 1 THEN 1 ELSE 0 END,
+    line_start = CASE
+        WHEN symbols.line_start IS NULL THEN excluded.line_start
+        WHEN excluded.line_start IS NULL THEN symbols.line_start
+        ELSE MIN(symbols.line_start, excluded.line_start)
+    END,
+    line_end = CASE
+        WHEN symbols.line_end IS NULL THEN excluded.line_end
+        WHEN excluded.line_end IS NULL THEN symbols.line_end
+        ELSE MAX(symbols.line_end, excluded.line_end)
+    END,
+    loc = COALESCE(symbols.loc, 0) + COALESCE(excluded.loc, 0),
+    parameter_count = MAX(COALESCE(symbols.parameter_count, 0), COALESCE(excluded.parameter_count, 0)),
+    return_type = COALESCE(symbols.return_type, excluded.return_type),
+    has_callback = CASE WHEN symbols.has_callback = 1 OR excluded.has_callback = 1 THEN 1 ELSE 0 END,
+    has_ui_dispatch = CASE WHEN symbols.has_ui_dispatch = 1 OR excluded.has_ui_dispatch = 1 THEN 1 ELSE 0 END,
+    has_task_spawn = CASE WHEN symbols.has_task_spawn = 1 OR excluded.has_task_spawn = 1 THEN 1 ELSE 0 END,
+    has_background_worker = CASE WHEN symbols.has_background_worker = 1 OR excluded.has_background_worker = 1 THEN 1 ELSE 0 END,
+    has_do_events = CASE WHEN symbols.has_do_events = 1 OR excluded.has_do_events = 1 THEN 1 ELSE 0 END,
+    has_lock = CASE WHEN symbols.has_lock = 1 OR excluded.has_lock = 1 THEN 1 ELSE 0 END,
+    has_thread_start = CASE WHEN symbols.has_thread_start = 1 OR excluded.has_thread_start = 1 THEN 1 ELSE 0 END,
+    has_blocking_wait = CASE WHEN symbols.has_blocking_wait = 1 OR excluded.has_blocking_wait = 1 THEN 1 ELSE 0 END,
+    fan_in = excluded.fan_in";
             
             var pId = command.Parameters.Add("@id", SqliteType.Text);
             var pDocId = command.Parameters.Add("@docId", SqliteType.Text);
@@ -190,8 +314,14 @@ WHERE s1.fqn = @callerFqn AND s2.fqn = @calleeFqn";
             var pCount = command.Parameters.Add("@count", SqliteType.Integer);
             var pCallType = command.Parameters.Add("@callType", SqliteType.Text);
 
+            var uniqueCalls = new HashSet<string>();
             foreach (var call in methodCalls)
             {
+                var key = $"{call.CallerId}|{call.CalleeId}|{call.CallType}";
+                if (!uniqueCalls.Add(key))
+                {
+                    continue;
+                }
                 pCaller.Value = call.CallerId;
                 pCallee.Value = call.CalleeId;
                 pCount.Value = call.CallCount;
@@ -272,8 +402,14 @@ WHERE s1.fqn = @derivedFqn AND s2.fqn = @baseFqn";
             var pBase = command.Parameters.Add("@baseFqn", SqliteType.Text);
             var pKind = command.Parameters.Add("@kind", SqliteType.Text);
 
+            var uniqueInheritances = new HashSet<string>();
             foreach (var inheritance in inheritances)
             {
+                var key = $"{inheritance.DerivedId}|{inheritance.BaseId}|{inheritance.Kind}";
+                if (!uniqueInheritances.Add(key))
+                {
+                    continue;
+                }
                 pDerived.Value = inheritance.DerivedId;
                 pBase.Value = inheritance.BaseId;
                 pKind.Value = inheritance.Kind;
@@ -291,17 +427,30 @@ WHERE s1.fqn = @derivedFqn AND s2.fqn = @baseFqn";
             command.Transaction = transaction;
 
             command.CommandText = @"
-INSERT OR IGNORE INTO symbol_relationships (source_id, target_id, relationship_type)
+INSERT INTO symbol_relationships (source_id, target_id, relationship_type)
 SELECT s1.id, s2.id, @kind
 FROM symbols s1, symbols s2
-WHERE s1.fqn = @sourceFqn AND s2.fqn = @targetFqn";
+WHERE s1.fqn = @sourceFqn AND s2.fqn = @targetFqn
+  AND NOT EXISTS (
+      SELECT 1
+      FROM symbol_relationships sr
+      WHERE sr.source_id = s1.id
+        AND sr.target_id = s2.id
+        AND sr.relationship_type = @kind
+  )";
 
             var pSource = command.Parameters.Add("@sourceFqn", SqliteType.Text);
             var pTarget = command.Parameters.Add("@targetFqn", SqliteType.Text);
             var pKind = command.Parameters.Add("@kind", SqliteType.Text);
 
+            var uniqueDependencies = new HashSet<string>();
             foreach (var dep in dependencies)
             {
+                var key = $"{dep.SourceFqn}|{dep.TargetFqn}|{dep.Kind}";
+                if (!uniqueDependencies.Add(key))
+                {
+                    continue;
+                }
                 pSource.Value = dep.SourceFqn;
                 pTarget.Value = dep.TargetFqn;
                 pKind.Value = dep.Kind;

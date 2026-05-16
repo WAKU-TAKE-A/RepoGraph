@@ -1,12 +1,15 @@
 # RepoGraph .gitignore
 
 SettingsOfThisPC.txt
+docs/SESSION_HANDOFF_*.md
 
 # User Requested
 _sample/
 brain/
 save-ai-outputs.py
 plan/
+tmp/
+tmpmsbuildcheck/
 
 # Analysis Workspace (Output)
 analysis_workspace/

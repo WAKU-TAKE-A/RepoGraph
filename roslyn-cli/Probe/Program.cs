@@ -11,6 +11,8 @@ using Probe.Config;
 using System.Linq;
 using System.Collections.Generic;
 using Microsoft.CodeAnalysis;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Probe
 {
@@ -22,6 +24,7 @@ namespace Probe
                 .AddLogging(builder => builder.AddConsole())
                 .AddSingleton<WorkspaceLoader>()
                 .AddSingleton<SymbolExtractor>()
+                .AddSingleton<XamlRelationshipExtractor>()
                 .AddSingleton<ConfigLoader>()
                 .BuildServiceProvider();
 
@@ -43,6 +46,7 @@ namespace Probe
                 var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
                 var loader = serviceProvider.GetRequiredService<WorkspaceLoader>();
                 var extractor = serviceProvider.GetRequiredService<SymbolExtractor>();
+                var xamlExtractor = serviceProvider.GetRequiredService<XamlRelationshipExtractor>();
                 
                 var dbPath = Path.Combine(output, "output", "repository.db");
                 Directory.CreateDirectory(Path.GetDirectoryName(dbPath) ?? "output");
@@ -66,7 +70,7 @@ namespace Probe
 
                 using var workspace = await loader.LoadWorkspaceAsync(path);
                 
-                var solutionId = workspace.CurrentSolution.Id.Id.ToString();
+                var solutionId = GetStableId(Path.GetFullPath(path));
                 await persistence.SaveSolutionAsync(solutionId, runId, path, Path.GetFileName(path));
 
                 var configLoader = serviceProvider.GetRequiredService<ConfigLoader>();
@@ -78,7 +82,13 @@ namespace Probe
                     : workspace.CurrentSolution.Projects.ToList();
                 logger.LogInformation("Found {Count} projects", projects.Count);
                 var savedProjectIds = new HashSet<ProjectId>();
+                var stableProjectIds = new Dictionary<ProjectId, string>();
                 var projectDependencies = new List<ProjectDependencyData>();
+                var allMethodCalls = new List<MethodCallData>();
+                var allInheritances = new List<InheritanceData>();
+                var allFieldAccesses = new List<FieldAccessData>();
+                var allTypeDependencies = new List<TypeDependencyData>();
+                var methodIndex = new Dictionary<string, List<string>>(StringComparer.Ordinal);
 
                 foreach (var project in projects)
                 {
@@ -91,7 +101,54 @@ namespace Probe
                         }
 
                         logger.LogInformation("Analyzing project: {Name}", project.Name);
-                        var projectId = project.Id.Id.ToString();
+                        var projectKey = Path.GetFullPath(project.FilePath ?? project.Name);
+                        var projectId = GetStableId(projectKey);
+                        stableProjectIds[project.Id] = projectId;
+                        var documentsToAnalyze = project.Documents
+                            .Where(document => !filterService.ShouldExcludeFile(document.FilePath ?? document.Name))
+                            .ToList();
+
+                        bool shouldAnalyzeProject = true;
+                        if (lastRunTime.HasValue)
+                        {
+                            shouldAnalyzeProject = false;
+
+                            if (project.FilePath != null && File.Exists(project.FilePath))
+                            {
+                                var projectLastWriteTime = File.GetLastWriteTimeUtc(project.FilePath);
+                                if (projectLastWriteTime > lastRunTime.Value)
+                                {
+                                    shouldAnalyzeProject = true;
+                                }
+                            }
+
+                            if (!shouldAnalyzeProject)
+                            {
+                                foreach (var document in documentsToAnalyze)
+                                {
+                                    if (document.FilePath == null || !File.Exists(document.FilePath))
+                                    {
+                                        shouldAnalyzeProject = true;
+                                        break;
+                                    }
+
+                                    var lastWriteTime = File.GetLastWriteTimeUtc(document.FilePath);
+                                    if (lastWriteTime > lastRunTime.Value)
+                                    {
+                                        shouldAnalyzeProject = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!shouldAnalyzeProject)
+                        {
+                            logger.LogInformation("Skipping unchanged project: {Name}", project.Name);
+                            continue;
+                        }
+
+                        await persistence.ResetProjectAnalysisDataAsync(projectId);
                         savedProjectIds.Add(project.Id);
                         await persistence.SaveProjectAsync(projectId, solutionId, runId, project.Name, project.FilePath ?? project.Name);
 
@@ -102,26 +159,12 @@ namespace Probe
                             continue;
                         }
 
-                        foreach (var document in project.Documents)
+                        foreach (var document in documentsToAnalyze)
                         {
                             try
                             {
-                                if (filterService.ShouldExcludeFile(document.FilePath ?? document.Name))
-                                {
-                                    continue;
-                                }
-
-                                if (lastRunTime.HasValue && document.FilePath != null && File.Exists(document.FilePath))
-                                {
-                                    var lastWriteTime = File.GetLastWriteTimeUtc(document.FilePath);
-                                    if (lastWriteTime <= lastRunTime.Value)
-                                    {
-                                        logger.LogDebug("Skipping unchanged file: {Name}", document.Name);
-                                        continue;
-                                    }
-                                }
-
-                                var documentId = document.Id.Id.ToString();
+                                var documentKey = Path.GetFullPath(document.FilePath ?? $"{projectKey}:{document.Name}");
+                                var documentId = GetStableId(documentKey);
                                 await persistence.SaveDocumentAsync(documentId, projectId, document.FilePath ?? document.Name, document.Name);
 
                                 var tree = await document.GetSyntaxTreeAsync();
@@ -138,31 +181,58 @@ namespace Probe
                                 if (result.Symbols.Any())
                                 {
                                     await persistence.SaveSymbolsAsync(result.Symbols);
+                                    IndexMethods(methodIndex, result.Symbols);
                                 }
 
                                 if (result.MethodCalls.Any())
                                 {
-                                    await persistence.SaveMethodCallsAsync(result.MethodCalls);
+                                    allMethodCalls.AddRange(result.MethodCalls);
                                 }
 
                                 if (result.Inheritances.Any())
                                 {
-                                    await persistence.SaveInheritancesAsync(result.Inheritances);
+                                    allInheritances.AddRange(result.Inheritances);
                                 }
 
                                 if (result.FieldAccesses.Any())
                                 {
-                                    await persistence.SaveFieldAccessesAsync(result.FieldAccesses);
+                                    allFieldAccesses.AddRange(result.FieldAccesses);
                                 }
 
                                 if (result.TypeDependencies.Any())
                                 {
-                                    await persistence.SaveTypeDependenciesAsync(result.TypeDependencies);
+                                    allTypeDependencies.AddRange(result.TypeDependencies);
                                 }
                             }
                             catch (Exception ex)
                             {
                                 logger.LogWarning(ex, "Failed to analyze document {Document} in project {Project}", document.Name, project.Name);
+                            }
+                        }
+
+                        var xamlPaths = FindProjectXamlFiles(project.FilePath ?? project.Name, filterService);
+                        if (xamlPaths.Count > 0)
+                        {
+                            var xamlResult = xamlExtractor.Extract(project.Name, projectId, project.FilePath ?? project.Name, xamlPaths, methodIndex);
+
+                            foreach (var xamlDocument in xamlResult.Documents)
+                            {
+                                await persistence.SaveDocumentAsync(xamlDocument.Id, xamlDocument.ProjectId, xamlDocument.FilePath, xamlDocument.Name);
+                            }
+
+                            if (xamlResult.Symbols.Count > 0)
+                            {
+                                await persistence.SaveSymbolsAsync(xamlResult.Symbols);
+                            }
+
+                            if (xamlResult.MethodCalls.Count > 0)
+                            {
+                                allMethodCalls.AddRange(xamlResult.MethodCalls);
+                            }
+
+                            if (xamlResult.TypeDependencies.Count > 0)
+                            {
+                                allTypeDependencies.AddRange(xamlResult.TypeDependencies);
                             }
                         }
                     }
@@ -183,8 +253,8 @@ namespace Probe
 
                         projectDependencies.Add(new ProjectDependencyData
                         {
-                            SourceProjectId = project.Id.Id.ToString(),
-                            TargetProjectId = projectReference.ProjectId.Id.ToString()
+                            SourceProjectId = stableProjectIds[project.Id],
+                            TargetProjectId = stableProjectIds[projectReference.ProjectId]
                         });
                     }
                 }
@@ -192,6 +262,26 @@ namespace Probe
                 if (projectDependencies.Any())
                 {
                     await persistence.SaveProjectDependenciesAsync(projectDependencies);
+                }
+
+                if (allMethodCalls.Any())
+                {
+                    await persistence.SaveMethodCallsAsync(allMethodCalls);
+                }
+
+                if (allInheritances.Any())
+                {
+                    await persistence.SaveInheritancesAsync(allInheritances);
+                }
+
+                if (allFieldAccesses.Any())
+                {
+                    await persistence.SaveFieldAccessesAsync(allFieldAccesses);
+                }
+
+                if (allTypeDependencies.Any())
+                {
+                    await persistence.SaveTypeDependenciesAsync(allTypeDependencies);
                 }
 
                 await persistence.UpdateMetricsAsync();
@@ -209,6 +299,53 @@ namespace Probe
             rootCommand.AddCommand(scanCommand);
 
             return await rootCommand.InvokeAsync(args);
+        }
+
+        private static string GetStableId(string input)
+        {
+            using var sha256 = SHA256.Create();
+            var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(input.ToLowerInvariant()));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
+        }
+
+        private static void IndexMethods(Dictionary<string, List<string>> methodIndex, IEnumerable<SymbolData> symbols)
+        {
+            foreach (var symbol in symbols)
+            {
+                if (symbol.Kind != "method" || string.IsNullOrWhiteSpace(symbol.ContainingType))
+                {
+                    continue;
+                }
+
+                var key = $"{symbol.ContainingType}|{symbol.Name}";
+                if (!methodIndex.TryGetValue(key, out var methods))
+                {
+                    methods = new List<string>();
+                    methodIndex[key] = methods;
+                }
+
+                if (!methods.Contains(symbol.Fqn, StringComparer.Ordinal))
+                {
+                    methods.Add(symbol.Fqn);
+                }
+            }
+        }
+
+        private static List<string> FindProjectXamlFiles(string projectPath, FilterService filterService)
+        {
+            var fullProjectPath = Path.GetFullPath(projectPath);
+            var projectDir = Path.GetDirectoryName(fullProjectPath);
+            if (string.IsNullOrWhiteSpace(projectDir) || !Directory.Exists(projectDir))
+            {
+                return new List<string>();
+            }
+
+            return Directory.EnumerateFiles(projectDir, "*.xaml", SearchOption.AllDirectories)
+                .Where(path =>
+                    !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) &&
+                    !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) &&
+                    !filterService.ShouldExcludeFile(path))
+                .ToList();
         }
     }
 }

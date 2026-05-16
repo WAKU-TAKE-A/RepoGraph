@@ -7,12 +7,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Runtime.CompilerServices;
 
 namespace Probe.Services.Analysis
 {
     public class SymbolExtractor
     {
         private readonly ILogger<SymbolExtractor> _logger;
+        private readonly ConditionalWeakTable<Compilation, CompilationAnalysisCache> _compilationCache = new();
 
         public SymbolExtractor(ILogger<SymbolExtractor> logger)
         {
@@ -23,6 +25,7 @@ namespace Probe.Services.Analysis
         {
             var result = new ExtractionResult();
             var semanticModel = compilation.GetSemanticModel(tree);
+            var compilationCache = _compilationCache.GetValue(compilation, BuildCompilationCache);
             var root = tree.GetRoot();
 
             foreach (var node in root.DescendantNodes())
@@ -36,7 +39,21 @@ namespace Probe.Services.Analysis
                         symbol = semanticModel.GetDeclaredSymbol(variable);
                         if (symbol != null)
                         {
-                            ProcessSymbol(semanticModel, variable, symbol, result);
+                            ProcessSymbol(compilationCache, semanticModel, variable, symbol, result);
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (node is EventFieldDeclarationSyntax eventFieldDecl)
+                {
+                    foreach (var variable in eventFieldDecl.Declaration.Variables)
+                    {
+                        symbol = semanticModel.GetDeclaredSymbol(variable);
+                        if (symbol != null)
+                        {
+                            ProcessSymbol(compilationCache, semanticModel, variable, symbol, result);
                         }
                     }
 
@@ -51,6 +68,8 @@ namespace Probe.Services.Analysis
                     symbol = semanticModel.GetDeclaredSymbol(ctorDecl);
                 else if (node is PropertyDeclarationSyntax propDecl)
                     symbol = semanticModel.GetDeclaredSymbol(propDecl);
+                else if (node is EventDeclarationSyntax eventDecl)
+                    symbol = semanticModel.GetDeclaredSymbol(eventDecl);
                 else if (node is AccessorDeclarationSyntax accessorDecl)
                     symbol = semanticModel.GetDeclaredSymbol(accessorDecl);
                 else if (node is LocalFunctionStatementSyntax localFunctionDecl)
@@ -58,27 +77,37 @@ namespace Probe.Services.Analysis
 
                 if (symbol != null)
                 {
-                    ProcessSymbol(semanticModel, node, symbol, result);
+                    ProcessSymbol(compilationCache, semanticModel, node, symbol, result);
                 }
+            }
+
+            foreach (var anonymousFunction in root.DescendantNodes().OfType<AnonymousFunctionExpressionSyntax>())
+            {
+                ProcessAnonymousFunction(compilationCache, semanticModel, anonymousFunction, result);
             }
 
             // Aggregate call counts
             result.MethodCalls = result.MethodCalls
-                .GroupBy(c => new { c.CallerId, c.CalleeId })
+                .GroupBy(c => new { c.CallerId, c.CalleeId, c.CallType })
                 .Select(g => new MethodCallData
                 {
                     CallerId = g.Key.CallerId,
                     CalleeId = g.Key.CalleeId,
-                    CallCount = g.Sum(x => x.CallCount)
+                    CallCount = g.Sum(x => x.CallCount),
+                    CallType = g.Key.CallType
                 }).ToList();
 
             // Deduplicate field accesses (upgrade read to read_write if both read and write exist)
             result.FieldAccesses = DeduplicateFieldAccesses(result.FieldAccesses);
+            result.TypeDependencies = result.TypeDependencies
+                .GroupBy(d => new { d.SourceFqn, d.TargetFqn, d.Kind })
+                .Select(g => g.First())
+                .ToList();
 
             return result;
         }
 
-        private void ProcessSymbol(SemanticModel semanticModel, SyntaxNode declarationNode, ISymbol symbol, ExtractionResult result)
+        private void ProcessSymbol(CompilationAnalysisCache compilationCache, SemanticModel semanticModel, SyntaxNode declarationNode, ISymbol symbol, ExtractionResult result)
         {
             var symbolData = MapToData(symbol, declarationNode);
             result.Symbols.Add(symbolData);
@@ -125,12 +154,32 @@ namespace Probe.Services.Analysis
 
             if (symbol is IMethodSymbol && IsExecutableNode(declarationNode))
             {
-                ExtractMethodCalls(semanticModel, declarationNode, symbolData, result);
+                ExtractMethodCalls(compilationCache, semanticModel, declarationNode, symbolData, result);
+                ExtractFrameworkConventionDependencies(compilationCache, semanticModel, declarationNode, symbolData, result);
                 ExtractThreadBoundaries(semanticModel, declarationNode, symbolData);
                 ExtractFieldAccesses(semanticModel, declarationNode, symbolData, result);
                 ExtractEventSubscriptions(semanticModel, declarationNode, symbolData, result);
                 ExtractTypeDependencies(semanticModel, declarationNode, symbolData, result);
             }
+        }
+
+        private void ProcessAnonymousFunction(CompilationAnalysisCache compilationCache, SemanticModel semanticModel, AnonymousFunctionExpressionSyntax anonymousFunction, ExtractionResult result)
+        {
+            var enclosingSymbol = GetContainingExecutableMethod(semanticModel.GetEnclosingSymbol(anonymousFunction.SpanStart));
+            if (enclosingSymbol == null)
+            {
+                return;
+            }
+
+            var symbolData = CreateAnonymousFunctionData(enclosingSymbol, anonymousFunction);
+            result.Symbols.Add(symbolData);
+
+            ExtractMethodCalls(compilationCache, semanticModel, anonymousFunction, symbolData, result);
+            ExtractThreadBoundaries(semanticModel, anonymousFunction, symbolData);
+            ExtractFieldAccesses(semanticModel, anonymousFunction, symbolData, result);
+            ExtractEventSubscriptions(semanticModel, anonymousFunction, symbolData, result);
+            ExtractTypeDependencies(semanticModel, anonymousFunction, symbolData, result);
+            PromoteAnonymousFunctionCalls(enclosingSymbol, symbolData, result);
         }
 
         private void RecordTypeDependency(ITypeSymbol? type, string sourceFqn, ExtractionResult result)
@@ -158,29 +207,41 @@ namespace Probe.Services.Analysis
 
         private void ExtractTypeDependencies(SemanticModel semanticModel, SyntaxNode node, SymbolData symbolData, ExtractionResult result)
         {
-            foreach (var typeNode in node.DescendantNodes().OfType<TypeSyntax>())
+            foreach (var typeNode in GetAnalysisDescendantNodes(node).OfType<TypeSyntax>())
             {
                 var typeInfo = semanticModel.GetTypeInfo(typeNode);
                 RecordTypeDependency(typeInfo.Type, symbolData.Fqn, result);
             }
 
             // Also check for 'new', 'as', 'is', and casts
-            foreach (var creation in node.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+            foreach (var creation in GetAnalysisDescendantNodes(node).OfType<ObjectCreationExpressionSyntax>())
             {
                 var symbolInfo = semanticModel.GetSymbolInfo(creation);
                 if (symbolInfo.Symbol is IMethodSymbol ctor)
                 {
                     RecordTypeDependency(ctor.ContainingType, symbolData.Fqn, result);
                 }
+                else
+                {
+                    var createdType = semanticModel.GetTypeInfo(creation).Type
+                        ?? semanticModel.GetTypeInfo(creation.Type).Type;
+                    RecordTypeDependency(createdType, symbolData.Fqn, result);
+                }
             }
 
-            foreach (var cast in node.DescendantNodes().OfType<CastExpressionSyntax>())
+            foreach (var implicitCreation in GetAnalysisDescendantNodes(node).OfType<ImplicitObjectCreationExpressionSyntax>())
+            {
+                var createdType = semanticModel.GetTypeInfo(implicitCreation).Type;
+                RecordTypeDependency(createdType, symbolData.Fqn, result);
+            }
+
+            foreach (var cast in GetAnalysisDescendantNodes(node).OfType<CastExpressionSyntax>())
             {
                 var typeInfo = semanticModel.GetTypeInfo(cast.Type);
                 RecordTypeDependency(typeInfo.Type, symbolData.Fqn, result);
             }
 
-            foreach (var binary in node.DescendantNodes().OfType<BinaryExpressionSyntax>())
+            foreach (var binary in GetAnalysisDescendantNodes(node).OfType<BinaryExpressionSyntax>())
             {
                 if (binary.IsKind(SyntaxKind.AsExpression) || binary.IsKind(SyntaxKind.IsExpression))
                 {
@@ -201,13 +262,13 @@ namespace Probe.Services.Analysis
         /// <summary>
         /// Extract method invocation calls.
         /// </summary>
-        private void ExtractMethodCalls(SemanticModel semanticModel, SyntaxNode methodNode, SymbolData symbolData, ExtractionResult result)
+        private void ExtractMethodCalls(CompilationAnalysisCache compilationCache, SemanticModel semanticModel, SyntaxNode methodNode, SymbolData symbolData, ExtractionResult result)
         {
-            var invocations = methodNode.DescendantNodes().OfType<InvocationExpressionSyntax>();
+            var invocations = GetAnalysisDescendantNodes(methodNode).OfType<InvocationExpressionSyntax>();
             foreach (var invocation in invocations)
             {
-                var symbolInfo = semanticModel.GetSymbolInfo(invocation);
-                if (symbolInfo.Symbol is IMethodSymbol calledMethod)
+                var calledMethod = ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation));
+                if (calledMethod != null)
                 {
                     result.MethodCalls.Add(new MethodCallData
                     {
@@ -215,6 +276,38 @@ namespace Probe.Services.Analysis
                         CalleeId = calledMethod.OriginalDefinition.ToDisplayString(),
                         CallCount = 1
                     });
+
+                    if (ShouldExpandDynamicDispatch(invocation, calledMethod))
+                    {
+                        foreach (var overrideFqn in compilationCache.GetDispatchTargets(calledMethod))
+                        {
+                            if (overrideFqn == calledMethod.OriginalDefinition.ToDisplayString())
+                            {
+                                continue;
+                            }
+
+                            result.MethodCalls.Add(new MethodCallData
+                            {
+                                CallerId = symbolData.Fqn,
+                                CalleeId = overrideFqn,
+                                CallCount = 1,
+                                CallType = "dynamic_dispatch"
+                            });
+                        }
+                    }
+                }
+                else
+                {
+                    foreach (var fallbackTarget in ResolveFallbackMethodTargets(compilationCache, semanticModel, invocation, symbolData))
+                    {
+                        result.MethodCalls.Add(new MethodCallData
+                        {
+                            CallerId = symbolData.Fqn,
+                            CalleeId = fallbackTarget,
+                            CallCount = 1,
+                            CallType = "calls_fallback"
+                        });
+                    }
                 }
             }
         }
@@ -230,13 +323,13 @@ namespace Probe.Services.Analysis
         private void ExtractThreadBoundaries(SemanticModel semanticModel, SyntaxNode methodNode, SymbolData symbolData)
         {
             // Check for lock statements
-            symbolData.HasLock = methodNode.DescendantNodes().OfType<LockStatementSyntax>().Any();
+            symbolData.HasLock = GetAnalysisDescendantNodes(methodNode).OfType<LockStatementSyntax>().Any();
 
-            var invocations = methodNode.DescendantNodes().OfType<InvocationExpressionSyntax>();
+            var invocations = GetAnalysisDescendantNodes(methodNode).OfType<InvocationExpressionSyntax>();
             foreach (var invocation in invocations)
             {
-                var symbolInfo = semanticModel.GetSymbolInfo(invocation);
-                if (symbolInfo.Symbol is IMethodSymbol calledMethod)
+                var calledMethod = ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation));
+                if (calledMethod != null)
                 {
                     var methodName = calledMethod.Name;
                     var containingTypeFqn = calledMethod.ContainingType?.ToDisplayString() ?? "";
@@ -327,7 +420,7 @@ namespace Probe.Services.Analysis
             if (fullText.Contains("new Thread(")) symbolData.HasThreadStart = true;
 
             // Also check for BackgroundWorker field declarations used in the method (e.g., _bgw.IsBusy)
-            var memberAccesses = methodNode.DescendantNodes().OfType<MemberAccessExpressionSyntax>();
+            var memberAccesses = GetAnalysisDescendantNodes(methodNode).OfType<MemberAccessExpressionSyntax>();
             foreach (var memberAccess in memberAccesses)
             {
                 var symbolInfo = semanticModel.GetSymbolInfo(memberAccess.Expression);
@@ -354,7 +447,7 @@ namespace Probe.Services.Analysis
         {
             var containingTypeFqn = symbolData.ContainingType;
 
-            foreach (var identNode in methodNode.DescendantNodes().OfType<IdentifierNameSyntax>())
+            foreach (var identNode in GetAnalysisDescendantNodes(methodNode).OfType<IdentifierNameSyntax>())
             {
                 var symbolInfo = semanticModel.GetSymbolInfo(identNode);
                 var accessedSymbol = symbolInfo.Symbol;
@@ -433,7 +526,7 @@ namespace Probe.Services.Analysis
         /// </summary>
         private void ExtractEventSubscriptions(SemanticModel semanticModel, SyntaxNode methodNode, SymbolData symbolData, ExtractionResult result)
         {
-            var assignments = methodNode.DescendantNodes().OfType<AssignmentExpressionSyntax>();
+            var assignments = GetAnalysisDescendantNodes(methodNode).OfType<AssignmentExpressionSyntax>();
             foreach (var assignment in assignments)
             {
                 if (assignment.IsKind(SyntaxKind.AddAssignmentExpression) ||
@@ -452,9 +545,64 @@ namespace Probe.Services.Analysis
                             CallCount = 1,
                             CallType = callType
                         });
+
+                    }
+
+                    foreach (var handlerMethod in ResolveDelegateTargetMethods(semanticModel, assignment.Right))
+                    {
+                        result.MethodCalls.Add(new MethodCallData
+                        {
+                            CallerId = symbolData.Fqn,
+                            CalleeId = handlerMethod.OriginalDefinition.ToDisplayString(),
+                            CallCount = 1,
+                            CallType = "delegate_reference"
+                        });
                     }
                 }
             }
+        }
+
+        private static IEnumerable<IMethodSymbol> ResolveDelegateTargetMethods(SemanticModel semanticModel, ExpressionSyntax expression)
+        {
+            var directInfo = semanticModel.GetSymbolInfo(expression);
+            if (directInfo.Symbol is IMethodSymbol directMethod)
+            {
+                yield return directMethod;
+                yield break;
+            }
+
+            if (expression is ObjectCreationExpressionSyntax creation &&
+                creation.ArgumentList is { Arguments.Count: > 0 })
+            {
+                foreach (var argument in creation.ArgumentList.Arguments)
+                {
+                    var argInfo = semanticModel.GetSymbolInfo(argument.Expression);
+                    if (argInfo.Symbol is IMethodSymbol method)
+                    {
+                        yield return method;
+                    }
+                }
+            }
+        }
+
+        private static IEnumerable<SyntaxNode> GetAnalysisDescendantNodes(SyntaxNode node)
+        {
+            if (node is AnonymousFunctionExpressionSyntax anonymousFunction)
+            {
+                if (anonymousFunction.Body is CSharpSyntaxNode bodyNode)
+                {
+                    return bodyNode.DescendantNodesAndSelf(descendIntoChildren: child => !IsNestedExecutableBoundary(child));
+                }
+
+                return Enumerable.Empty<SyntaxNode>();
+            }
+
+            return node.DescendantNodes(descendIntoChildren: child => !IsNestedExecutableBoundary(child));
+        }
+
+        private static bool IsNestedExecutableBoundary(SyntaxNode node)
+        {
+            return node is LocalFunctionStatementSyntax || node is AnonymousFunctionExpressionSyntax;
         }
 
         /// <summary>
@@ -497,6 +645,266 @@ namespace Probe.Services.Analysis
             return false;
         }
 
+        private static bool ShouldExpandDynamicDispatch(InvocationExpressionSyntax invocation, IMethodSymbol calledMethod)
+        {
+            if (!(calledMethod.IsAbstract || calledMethod.ContainingType?.TypeKind == TypeKind.Interface))
+            {
+                return false;
+            }
+
+            if (invocation.Expression is IdentifierNameSyntax)
+            {
+                return true;
+            }
+
+            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+            {
+                return memberAccess.Expression is ThisExpressionSyntax;
+            }
+
+            return false;
+        }
+
+        private void ExtractFrameworkConventionDependencies(CompilationAnalysisCache compilationCache, SemanticModel semanticModel, SyntaxNode node, SymbolData symbolData, ExtractionResult result)
+        {
+            foreach (var invocation in GetAnalysisDescendantNodes(node).OfType<InvocationExpressionSyntax>())
+            {
+                var calledMethod = ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation));
+                if (calledMethod == null)
+                {
+                    continue;
+                }
+
+                if (!string.Equals(calledMethod.Name, "RegisterAssemblyModules", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                foreach (var moduleType in compilationCache.GetAutofacModuleTypes())
+                {
+                    result.TypeDependencies.Add(new TypeDependencyData
+                    {
+                        SourceFqn = symbolData.Fqn,
+                        TargetFqn = moduleType,
+                        Kind = "reflection_registration"
+                    });
+                }
+
+                foreach (var loadMethod in compilationCache.GetAutofacModuleLoadMethods())
+                {
+                    result.MethodCalls.Add(new MethodCallData
+                    {
+                        CallerId = symbolData.Fqn,
+                        CalleeId = loadMethod,
+                        CallCount = 1,
+                        CallType = "framework_dispatch"
+                    });
+                }
+            }
+        }
+
+        private static IEnumerable<string> ResolveFallbackMethodTargets(CompilationAnalysisCache compilationCache, SemanticModel semanticModel, InvocationExpressionSyntax invocation, SymbolData symbolData)
+        {
+            if (string.IsNullOrWhiteSpace(symbolData.ContainingType))
+            {
+                yield break;
+            }
+
+            string? methodName = null;
+            if (invocation.Expression is IdentifierNameSyntax identifier)
+            {
+                methodName = identifier.Identifier.ValueText;
+            }
+            else if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                     memberAccess.Expression is ThisExpressionSyntax)
+            {
+                methodName = memberAccess.Name.Identifier.ValueText;
+            }
+
+            if (string.IsNullOrWhiteSpace(methodName))
+            {
+                yield break;
+            }
+
+            var argumentCount = invocation.ArgumentList.Arguments.Count;
+            foreach (var candidate in compilationCache.GetMethodCandidates(symbolData.ContainingType!, methodName, argumentCount))
+            {
+                yield return candidate;
+            }
+        }
+
+        private static SymbolData CreateAnonymousFunctionData(IMethodSymbol enclosingSymbol, AnonymousFunctionExpressionSyntax anonymousFunction)
+        {
+            var lineSpan = anonymousFunction.GetLocation().GetLineSpan();
+            var line = lineSpan.StartLinePosition.Line + 1;
+            var column = lineSpan.StartLinePosition.Character + 1;
+            var name = $"<lambda@L{line}C{column}>";
+            var fqn = $"{enclosingSymbol.OriginalDefinition.ToDisplayString()}.{name}";
+
+            var parameterCount = anonymousFunction switch
+            {
+                ParenthesizedLambdaExpressionSyntax parenthesized => parenthesized.ParameterList.Parameters.Count,
+                SimpleLambdaExpressionSyntax => 1,
+                AnonymousMethodExpressionSyntax anonymousMethod when anonymousMethod.ParameterList != null => anonymousMethod.ParameterList.Parameters.Count,
+                _ => 0
+            };
+
+            return new SymbolData
+            {
+                Id = GetStableHash(fqn),
+                Fqn = fqn,
+                Name = name,
+                Kind = "lambda",
+                Namespace = enclosingSymbol.ContainingNamespace?.ToDisplayString(),
+                ContainingType = enclosingSymbol.ContainingType?.ToDisplayString(),
+                Accessibility = "private",
+                IsStatic = enclosingSymbol.IsStatic,
+                IsAsync = anonymousFunction.AsyncKeyword != default,
+                LineStart = line,
+                LineEnd = lineSpan.EndLinePosition.Line + 1,
+                Loc = anonymousFunction.ToString().Split('\n').Length,
+                ParameterCount = parameterCount,
+                ReturnType = "unknown"
+            };
+        }
+
+        private static IMethodSymbol? ResolveCalledMethodSymbol(SymbolInfo symbolInfo)
+        {
+            if (symbolInfo.Symbol is IMethodSymbol methodSymbol)
+            {
+                return methodSymbol;
+            }
+
+            if (symbolInfo.CandidateSymbols.Length == 1 && symbolInfo.CandidateSymbols[0] is IMethodSymbol candidateMethod)
+            {
+                return candidateMethod;
+            }
+
+            return null;
+        }
+
+        private static IMethodSymbol? GetContainingExecutableMethod(ISymbol? symbol)
+        {
+            var current = symbol;
+            while (current != null)
+            {
+                if (current is IMethodSymbol methodSymbol &&
+                    methodSymbol.MethodKind != MethodKind.AnonymousFunction)
+                {
+                    return methodSymbol;
+                }
+
+                current = current.ContainingSymbol;
+            }
+
+            return null;
+        }
+
+        private static void PromoteAnonymousFunctionCalls(IMethodSymbol enclosingSymbol, SymbolData lambdaSymbol, ExtractionResult result)
+        {
+            var enclosingFqn = enclosingSymbol.OriginalDefinition.ToDisplayString();
+            var promotedCalls = result.MethodCalls
+                .Where(call => call.CallerId == lambdaSymbol.Fqn)
+                .Select(call => new MethodCallData
+                {
+                    CallerId = enclosingFqn,
+                    CalleeId = call.CalleeId,
+                    CallCount = call.CallCount,
+                    CallType = call.CallType == "calls" ? "lambda_dispatch" : call.CallType
+                })
+                .ToList();
+
+            if (promotedCalls.Count > 0)
+            {
+                result.MethodCalls.AddRange(promotedCalls);
+            }
+        }
+
+        private CompilationAnalysisCache BuildCompilationCache(Compilation compilation)
+        {
+            var overrideMap = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            var methodLookup = new Dictionary<string, List<MethodLookupEntry>>(StringComparer.Ordinal);
+            var autofacModuleTypes = new HashSet<string>(StringComparer.Ordinal);
+            var autofacModuleLoadMethods = new HashSet<string>(StringComparer.Ordinal);
+            VisitNamespace(compilation.GlobalNamespace, overrideMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+            return new CompilationAnalysisCache(overrideMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+        }
+
+        private void VisitNamespace(INamespaceSymbol ns, Dictionary<string, HashSet<string>> overrideMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods)
+        {
+            foreach (var member in ns.GetMembers())
+            {
+                if (member is INamespaceSymbol childNs)
+                {
+                    VisitNamespace(childNs, overrideMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+                }
+                else if (member is INamedTypeSymbol namedType)
+                {
+                    VisitType(namedType, overrideMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+                }
+            }
+        }
+
+        private void VisitType(INamedTypeSymbol type, Dictionary<string, HashSet<string>> overrideMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods)
+        {
+            foreach (var nested in type.GetTypeMembers())
+            {
+                VisitType(nested, overrideMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+            }
+
+            var isAutofacModule = IsOrDerivedFrom(type, "Autofac.Module");
+            if (isAutofacModule)
+            {
+                autofacModuleTypes.Add(type.OriginalDefinition.ToDisplayString());
+            }
+
+            foreach (var method in type.GetMembers().OfType<IMethodSymbol>())
+            {
+                var lookupKey = BuildMethodLookupKey(type.OriginalDefinition.ToDisplayString(), method.Name);
+                if (!methodLookup.TryGetValue(lookupKey, out var methods))
+                {
+                    methods = new List<MethodLookupEntry>();
+                    methodLookup[lookupKey] = methods;
+                }
+
+                var fqn = method.OriginalDefinition.ToDisplayString();
+                if (!methods.Any(m => m.Fqn == fqn))
+                {
+                    methods.Add(new MethodLookupEntry
+                    {
+                        Fqn = fqn,
+                        ParameterCount = method.Parameters.Length
+                    });
+                }
+
+                if (isAutofacModule &&
+                    string.Equals(method.Name, "Load", StringComparison.Ordinal) &&
+                    method.Parameters.Length == 1)
+                {
+                    autofacModuleLoadMethods.Add(fqn);
+                }
+
+                if (method.OverriddenMethod == null)
+                {
+                    continue;
+                }
+
+                var baseFqn = method.OverriddenMethod.OriginalDefinition.ToDisplayString();
+                if (!overrideMap.TryGetValue(baseFqn, out var targets))
+                {
+                    targets = new HashSet<string>(StringComparer.Ordinal);
+                    overrideMap[baseFqn] = targets;
+                }
+
+                targets.Add(fqn);
+            }
+        }
+
+        private static string BuildMethodLookupKey(string containingType, string methodName)
+        {
+            return $"{containingType}|{methodName}";
+        }
+
         private static string GetStableHash(string input)
         {
             using var sha256 = SHA256.Create();
@@ -520,7 +928,7 @@ namespace Probe.Services.Analysis
                 IsAbstract = symbol.IsAbstract,
                 IsSealed = symbol.IsSealed,
                 IsAsync = false,
-                IsPartial = false,
+                IsPartial = IsPartialDeclaration(node),
                 IsGeneric = false,
                 IsVolatile = false,
                 LineStart = node.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
@@ -553,6 +961,16 @@ namespace Probe.Services.Analysis
             }
 
             return data;
+        }
+
+        private static bool IsPartialDeclaration(SyntaxNode node)
+        {
+            return node switch
+            {
+                BaseTypeDeclarationSyntax typeDecl => typeDecl.Modifiers.Any(SyntaxKind.PartialKeyword),
+                MethodDeclarationSyntax methodDecl => methodDecl.Modifiers.Any(SyntaxKind.PartialKeyword),
+                _ => false
+            };
         }
     }
 
@@ -636,5 +1054,70 @@ namespace Probe.Services.Analysis
         public List<InheritanceData> Inheritances { get; set; } = new List<InheritanceData>();
         public List<FieldAccessData> FieldAccesses { get; set; } = new List<FieldAccessData>();
         public List<TypeDependencyData> TypeDependencies { get; set; } = new List<TypeDependencyData>();
+    }
+
+    internal sealed class CompilationAnalysisCache
+    {
+        private readonly Dictionary<string, HashSet<string>> _overrideMap;
+        private readonly Dictionary<string, List<MethodLookupEntry>> _methodLookup;
+        private readonly HashSet<string> _autofacModuleTypes;
+        private readonly HashSet<string> _autofacModuleLoadMethods;
+
+        public CompilationAnalysisCache(
+            Dictionary<string, HashSet<string>> overrideMap,
+            Dictionary<string, List<MethodLookupEntry>> methodLookup,
+            HashSet<string> autofacModuleTypes,
+            HashSet<string> autofacModuleLoadMethods)
+        {
+            _overrideMap = overrideMap;
+            _methodLookup = methodLookup;
+            _autofacModuleTypes = autofacModuleTypes;
+            _autofacModuleLoadMethods = autofacModuleLoadMethods;
+        }
+
+        public IEnumerable<string> GetDispatchTargets(IMethodSymbol calledMethod)
+        {
+            var baseFqn = calledMethod.OriginalDefinition.ToDisplayString();
+            return _overrideMap.TryGetValue(baseFqn, out var targets)
+                ? targets
+                : Array.Empty<string>();
+        }
+
+        public IEnumerable<string> GetMethodCandidates(string containingType, string methodName, int argumentCount)
+        {
+            var key = $"{containingType}|{methodName}";
+            if (!_methodLookup.TryGetValue(key, out var methods))
+            {
+                return Array.Empty<string>();
+            }
+
+            var exact = methods
+                .Where(m => m.ParameterCount == argumentCount)
+                .Select(m => m.Fqn)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (exact.Count > 0)
+            {
+                return exact;
+            }
+
+            return methods.Select(m => m.Fqn).Distinct(StringComparer.Ordinal).ToList();
+        }
+
+        public IEnumerable<string> GetAutofacModuleTypes()
+        {
+            return _autofacModuleTypes;
+        }
+
+        public IEnumerable<string> GetAutofacModuleLoadMethods()
+        {
+            return _autofacModuleLoadMethods;
+        }
+    }
+
+    internal sealed class MethodLookupEntry
+    {
+        public string Fqn { get; set; } = "";
+        public int ParameterCount { get; set; }
     }
 }

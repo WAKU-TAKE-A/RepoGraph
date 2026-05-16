@@ -20,6 +20,13 @@ class HotspotScorer:
         self.graph = graph_loader
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
+        self._projects = self.session.query(Project).all()
+        self._project_name_by_id = {project.id: project.name for project in self._projects}
+        self._test_project_ids = {project.id for project in self._projects if project.is_test_project}
+        self._symbol_project_ids = {
+            fqn: project_id
+            for fqn, project_id in self.session.query(Symbol.fqn, Symbol.project_id).all()
+        }
         
         # Default weights
         self.weights = {
@@ -33,10 +40,7 @@ class HotspotScorer:
 
     def compute_hotspots(self) -> List[Dict[str, Any]]:
         symbols = self.session.query(Symbol).all()
-        projects = self.session.query(Project).all()
         logger.info(f"Computing hotspots for {len(symbols)} symbols...")
-
-        project_name_by_id = {project.id: project.name for project in projects}
         raw_metrics = []
 
         # 1. Gather raw metrics
@@ -44,7 +48,7 @@ class HotspotScorer:
         for symbol in symbols:
             fan_in = self.graph.call_graph.in_degree(symbol.fqn) if symbol.fqn in self.graph.call_graph else 0
             fan_out = self.graph.call_graph.out_degree(symbol.fqn) if symbol.fqn in self.graph.call_graph else 0
-            project_name = project_name_by_id.get(symbol.project_id, "")
+            project_name = self._project_name_by_id.get(symbol.project_id, "")
             static_coupling = self.graph.dependency_graph.degree(project_name) if project_name and project_name in self.graph.dependency_graph else 0
             
             symbols_with_metrics.append({
@@ -53,6 +57,7 @@ class HotspotScorer:
                 "fan_out": fan_out,
                 "static_coupling": static_coupling,
                 "project_name": project_name,
+                "is_test_project": self._is_test_symbol(symbol),
             })
 
         # 1b. Aggregate member Fan-In into Classes
@@ -95,6 +100,7 @@ class HotspotScorer:
                 "has_thread_start": bool(s.has_thread_start),
                 "has_blocking_wait": bool(s.has_blocking_wait),
                 "project_name": item["project_name"],
+                "is_test_project": item["is_test_project"],
             })
             
         if not raw_metrics:
@@ -163,6 +169,7 @@ class HotspotScorer:
                 },
                 "metrics": m,
                 "project_name": r["project_name"],
+                "is_test_project": r["is_test_project"],
             })
             
         # 4. Sort by score descending
@@ -217,6 +224,10 @@ class HotspotScorer:
         # Find fields with multiple writers (dangerous shared state)
         shared_state = []
         for target_fqn, info in target_writers.items():
+            target_project_id = self._symbol_project_ids.get(target_fqn)
+            if target_project_id in self._test_project_ids or self._looks_like_test_target(target_fqn):
+                continue
+
             writer_count = len(info["writers"])
             external_writer_count = len(info["external_writers"])
             reader_count = len(info["readers"])
@@ -259,6 +270,26 @@ class HotspotScorer:
         shared_state.sort(key=lambda x: (x["risk_score"], x["writer_count"]), reverse=True)
         return shared_state
 
+    def _is_test_symbol(self, symbol: Symbol) -> bool:
+        if symbol.project_id in self._test_project_ids:
+            return True
+
+        file_path = symbol.document.file_path if symbol.document and symbol.document.file_path else ""
+        combined = f"{symbol.fqn} {file_path}".lower()
+        markers = (
+            ".unittest.", ".tests.", ".test.",
+            "\\unittest\\", "\\tests\\", "\\test\\",
+            "\\integrationtests\\", "\\livetests\\", "\\browser.tests\\",
+        )
+        return any(marker in combined for marker in markers)
+
+    @staticmethod
+    def _looks_like_test_target(target_fqn: str) -> bool:
+        target_lower = target_fqn.lower()
+        return any(marker in target_lower for marker in (
+            ".unittest.", ".tests.", ".test."
+        ))
+
     def generate_reports(self):
         hotspots = self.compute_hotspots()
         shared_state = self.compute_shared_mutable_state()
@@ -280,7 +311,7 @@ class HotspotScorer:
             f.write("# Repository Hotspots\n\n")
             
             # --- Anti-Pattern Warnings (God Class) ---
-            anti_patterns = [h for h in hotspots if h["is_anti_pattern"]]
+            anti_patterns = [h for h in hotspots if h["is_anti_pattern"] and not h["is_test_project"]]
             if anti_patterns:
                 f.write("## ⚠️ Anti-Pattern Warnings (God Class / Service Locator)\n\n")
                 f.write("> [!WARNING]\n")
@@ -294,7 +325,7 @@ class HotspotScorer:
                 f.write("\n---\n\n")
 
             # --- Threading Hazard Warnings ---
-            threading_hazards = [h for h in hotspots if h["is_threading_hazard"]]
+            threading_hazards = [h for h in hotspots if h["is_threading_hazard"] and not h["is_test_project"]]
             if threading_hazards:
                 f.write("## 🔴 Threading Hazard Warnings\n\n")
                 f.write("> [!CAUTION]\n")
@@ -354,7 +385,8 @@ class HotspotScorer:
             f.write("| Rank | Score | Kind | Symbol (FQN) | LOC | Fan-in | Fan-out |\n")
             f.write("|------|-------|------|--------------|-----|--------|----------|\n")
             
-            for i, h in enumerate(hotspots[:50]): # Top 50
+            ranked_hotspots = [h for h in hotspots if not h["is_test_project"]]
+            for i, h in enumerate(ranked_hotspots[:50]): # Top 50
                 m = h["metrics"]
                 link = f"[`{h['fqn']}`]({h['file_name']}#L{h['line_start']})" if h['file_name'] else f"`{h['fqn']}`"
                 f.write(f"| {i+1} | {h['score']:.4f} | {h['kind']} | {link} | {m['loc']} | {m['fan_in']} | {m['fan_out']} |\n")

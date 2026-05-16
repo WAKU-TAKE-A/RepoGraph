@@ -1,0 +1,369 @@
+using Microsoft.Extensions.Logging;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Xml.Linq;
+
+namespace Probe.Services.Analysis
+{
+    public class XamlRelationshipExtractor
+    {
+        private static readonly Regex HandlerNamePattern = new("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
+        private static readonly HashSet<string> KnownEventAttributes = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Startup", "Exit", "DispatcherUnhandledException", "Loaded", "Unloaded",
+            "Initialized", "Click", "Checked", "Unchecked", "Indeterminate",
+            "SelectionChanged", "TextChanged", "ValueChanged", "Executed", "CanExecute",
+            "MouseDown", "MouseUp", "MouseMove", "MouseEnter", "MouseLeave",
+            "PreviewMouseDown", "PreviewMouseUp", "PreviewMouseMove", "PreviewMouseWheel",
+            "KeyDown", "KeyUp", "PreviewKeyDown", "PreviewKeyUp", "PreviewTextInput",
+            "Drop", "DragEnter", "DragLeave", "DragOver", "Closing", "Closed",
+            "Activated", "Deactivated", "ContentRendered", "SourceInitialized",
+            "Tick", "ScrollChanged", "CellEditEnding", "RowEditEnding",
+            "GotFocus", "LostFocus", "TargetUpdated", "SizeChanged"
+        };
+
+        private readonly ILogger<XamlRelationshipExtractor> _logger;
+
+        public XamlRelationshipExtractor(ILogger<XamlRelationshipExtractor> logger)
+        {
+            _logger = logger;
+        }
+
+        public XamlExtractionResult Extract(
+            string projectName,
+            string projectId,
+            string projectPath,
+            IEnumerable<string> xamlPaths,
+            IReadOnlyDictionary<string, List<string>> methodsByTypeAndName)
+        {
+            var result = new XamlExtractionResult();
+            var fullProjectPath = Path.GetFullPath(projectPath);
+            var projectDir = Path.GetDirectoryName(fullProjectPath) ?? fullProjectPath;
+            var xamlClassByPath = BuildXamlClassMap(xamlPaths);
+
+            foreach (var xamlPath in xamlPaths)
+            {
+                try
+                {
+                    var fullXamlPath = Path.GetFullPath(xamlPath);
+                    if (!File.Exists(fullXamlPath))
+                    {
+                        continue;
+                    }
+
+                    var doc = XDocument.Load(fullXamlPath, LoadOptions.SetLineInfo);
+                    var root = doc.Root;
+                    if (root == null)
+                    {
+                        continue;
+                    }
+
+                    var xClass = GetXClass(root);
+                    if (string.IsNullOrWhiteSpace(xClass))
+                    {
+                        continue;
+                    }
+
+                    var documentId = GetStableId(fullXamlPath);
+                    result.Documents.Add(new XamlDocumentData
+                    {
+                        Id = documentId,
+                        ProjectId = projectId,
+                        FilePath = fullXamlPath,
+                        Name = Path.GetFileName(fullXamlPath)
+                    });
+
+                    var symbolFqn = $"xaml::{xClass}::{Path.GetFileName(fullXamlPath)}";
+                    result.Symbols.Add(CreateXamlSymbol(projectId, documentId, symbolFqn, xClass, fullXamlPath));
+                    result.TypeDependencies.Add(new TypeDependencyData
+                    {
+                        SourceFqn = symbolFqn,
+                        TargetFqn = xClass,
+                        Kind = "xaml_codebehind"
+                    });
+
+                    var clrNamespaceMappings = root.Attributes()
+                        .Where(a => a.IsNamespaceDeclaration && a.Value.StartsWith("clr-namespace:", StringComparison.Ordinal))
+                        .Select(a => new
+                        {
+                            Prefix = a.Name.LocalName == "xmlns" ? string.Empty : a.Name.LocalName,
+                            Value = a.Value
+                        })
+                        .ToDictionary(
+                            x => x.Prefix,
+                            x => ParseClrNamespaceMapping(x.Value),
+                            StringComparer.Ordinal);
+
+                    foreach (var element in root.DescendantsAndSelf())
+                    {
+                        if (TryResolveElementType(element, clrNamespaceMappings, out var elementTypeFqn))
+                        {
+                            result.TypeDependencies.Add(new TypeDependencyData
+                            {
+                                SourceFqn = symbolFqn,
+                                TargetFqn = elementTypeFqn,
+                                Kind = "xaml_type_usage"
+                            });
+                        }
+
+                        foreach (var attribute in element.Attributes())
+                        {
+                            if (attribute.IsNamespaceDeclaration)
+                            {
+                                continue;
+                            }
+
+                            var attrName = attribute.Name.LocalName;
+                            var attrValue = attribute.Value?.Trim();
+                            if (string.IsNullOrWhiteSpace(attrValue))
+                            {
+                                continue;
+                            }
+
+                            if (LooksLikeEventAttribute(attrName) && LooksLikeHandlerName(attrValue))
+                            {
+                                if (methodsByTypeAndName.TryGetValue(BuildMethodIndexKey(xClass, attrValue), out var handlers))
+                                {
+                                    foreach (var handlerFqn in handlers)
+                                    {
+                                        result.MethodCalls.Add(new MethodCallData
+                                        {
+                                            CallerId = symbolFqn,
+                                            CalleeId = handlerFqn,
+                                            CallCount = 1,
+                                            CallType = "xaml_event"
+                                        });
+                                    }
+                                }
+                            }
+
+                            if (attrName.Equals("StartupUri", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var targetClass = ResolveStartupUriTarget(fullXamlPath, attrValue, xamlClassByPath, projectDir);
+                                if (!string.IsNullOrWhiteSpace(targetClass))
+                                {
+                                    result.TypeDependencies.Add(new TypeDependencyData
+                                    {
+                                        SourceFqn = symbolFqn,
+                                        TargetFqn = targetClass,
+                                        Kind = "xaml_navigation"
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to analyze XAML file {File}", xamlPath);
+                }
+            }
+
+            return result;
+        }
+
+        private static Dictionary<string, string> BuildXamlClassMap(IEnumerable<string> xamlPaths)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var xamlPath in xamlPaths)
+            {
+                try
+                {
+                    var fullPath = Path.GetFullPath(xamlPath);
+                    if (!File.Exists(fullPath))
+                    {
+                        continue;
+                    }
+
+                    var doc = XDocument.Load(fullPath);
+                    var root = doc.Root;
+                    var xClass = root == null ? null : GetXClass(root);
+                    if (!string.IsNullOrWhiteSpace(xClass))
+                    {
+                        result[fullPath] = xClass;
+                    }
+                }
+                catch
+                {
+                    // Best-effort only. Individual file failures are handled in the main pass.
+                }
+            }
+
+            return result;
+        }
+
+        private static string? ResolveStartupUriTarget(string currentXamlPath, string startupUriValue, IReadOnlyDictionary<string, string> xamlClassByPath, string projectDir)
+        {
+            var cleanValue = startupUriValue.Split('#')[0].Trim();
+            if (string.IsNullOrWhiteSpace(cleanValue))
+            {
+                return null;
+            }
+
+            var candidatePaths = new List<string>();
+            if (Path.IsPathRooted(cleanValue))
+            {
+                candidatePaths.Add(Path.GetFullPath(cleanValue));
+            }
+            else
+            {
+                var currentDir = Path.GetDirectoryName(currentXamlPath) ?? projectDir;
+                candidatePaths.Add(Path.GetFullPath(Path.Combine(currentDir, cleanValue)));
+                candidatePaths.Add(Path.GetFullPath(Path.Combine(projectDir, cleanValue)));
+            }
+
+            foreach (var candidate in candidatePaths.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (xamlClassByPath.TryGetValue(candidate, out var xClass))
+                {
+                    return xClass;
+                }
+            }
+
+            return null;
+        }
+
+        private static bool LooksLikeEventAttribute(string name)
+        {
+            if (KnownEventAttributes.Contains(name))
+            {
+                return true;
+            }
+
+            return name.EndsWith("Changed", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("Click", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("Loaded", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("Executed", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("CanExecute", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("Closing", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("Closed", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("SelectionChanged", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("MouseDown", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("MouseUp", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("MouseMove", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("KeyDown", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("KeyUp", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool LooksLikeHandlerName(string value)
+        {
+            return HandlerNamePattern.IsMatch(value);
+        }
+
+        private static bool TryResolveElementType(XElement element, IReadOnlyDictionary<string, ClrNamespaceMapping> mappings, out string typeFqn)
+        {
+            typeFqn = string.Empty;
+            var prefix = element.GetPrefixOfNamespace(element.Name.Namespace) ?? string.Empty;
+            if (!mappings.TryGetValue(prefix, out var mapping) || string.IsNullOrWhiteSpace(mapping.Namespace))
+            {
+                return false;
+            }
+
+            var localName = element.Name.LocalName;
+            if (localName.Contains('.'))
+            {
+                return false;
+            }
+
+            typeFqn = $"{mapping.Namespace}.{localName}";
+            return true;
+        }
+
+        private static string? GetXClass(XElement root)
+        {
+            return root.Attributes().FirstOrDefault(a =>
+                    a.Name.LocalName == "Class" &&
+                    a.Name.NamespaceName == "http://schemas.microsoft.com/winfx/2006/xaml")
+                ?.Value;
+        }
+
+        private static SymbolData CreateXamlSymbol(string projectId, string documentId, string symbolFqn, string xClass, string fullXamlPath)
+        {
+            var lineCount = 0;
+            using (var reader = new StreamReader(fullXamlPath, Encoding.UTF8, true))
+            {
+                while (reader.ReadLine() != null)
+                {
+                    lineCount++;
+                }
+            }
+
+            var lastDot = xClass.LastIndexOf('.');
+            var ns = lastDot >= 0 ? xClass[..lastDot] : null;
+
+            return new SymbolData
+            {
+                Id = GetStableId(symbolFqn),
+                ProjectId = projectId,
+                DocumentId = documentId,
+                Fqn = symbolFqn,
+                Name = Path.GetFileNameWithoutExtension(fullXamlPath),
+                Kind = "xaml",
+                Namespace = ns,
+                ContainingType = xClass,
+                Accessibility = "private",
+                LineStart = 1,
+                LineEnd = Math.Max(1, lineCount),
+                Loc = Math.Max(1, lineCount)
+            };
+        }
+
+        private static string BuildMethodIndexKey(string containingType, string methodName)
+        {
+            return $"{containingType}|{methodName}";
+        }
+
+        private static ClrNamespaceMapping ParseClrNamespaceMapping(string value)
+        {
+            var parts = value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var mapping = new ClrNamespaceMapping();
+            foreach (var part in parts)
+            {
+                if (part.StartsWith("clr-namespace:", StringComparison.Ordinal))
+                {
+                    mapping.Namespace = part["clr-namespace:".Length..];
+                }
+                else if (part.StartsWith("assembly=", StringComparison.Ordinal))
+                {
+                    mapping.Assembly = part["assembly=".Length..];
+                }
+            }
+
+            return mapping;
+        }
+
+        private static string GetStableId(string input)
+        {
+            using var sha256 = SHA256.Create();
+            var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(input.ToLowerInvariant()));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
+        }
+    }
+
+    public class XamlExtractionResult
+    {
+        public List<XamlDocumentData> Documents { get; } = new();
+        public List<SymbolData> Symbols { get; } = new();
+        public List<MethodCallData> MethodCalls { get; } = new();
+        public List<TypeDependencyData> TypeDependencies { get; } = new();
+    }
+
+    public class XamlDocumentData
+    {
+        public string Id { get; set; } = "";
+        public string ProjectId { get; set; } = "";
+        public string FilePath { get; set; } = "";
+        public string Name { get; set; } = "";
+    }
+
+    internal sealed class ClrNamespaceMapping
+    {
+        public string Namespace { get; set; } = "";
+        public string Assembly { get; set; } = "";
+    }
+}

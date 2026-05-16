@@ -1,51 +1,52 @@
-# RepoGraph (v0.9.4.0)
+# RepoGraph (v0.9.5.0)
 
-**RepoGraph** は、巨大な C# レガシーコードベースを、AIエージェント（Claude Code, Antigravity, Cursor 等）が自律的に探索・分析・リファクタリング可能にするための「AIエージェント専用ツールチェーン」です。
+RepoGraph は、C# / .NET リポジトリを機械的に読み取りやすい形へ変換するための解析ツールチェーンです。
+主目的は、巨大なコードベースで AI や人間が「どこが中心か」「どこが危険か」「どこで状態が共有されているか」を掴みやすくすることです。
 
-## 🤖 AIエージェントとの共同作業に特化
-このツールは、人間が読むためだけではなく、**生成AIが「コードの実行時コンテキスト」を正しく把握するための「サイバー・アイ（電子の眼）」**として設計されています。
+## 何が分かるか
+- `Probe` が Roslyn / MSBuild を使って `symbols`、`method_calls`、`field_accesses`、`type_dependency` などを抽出します。
+- `Relay` がその出力を使って `hotspots.md`、`dead_code_candidates.md`、RAG 用 index を生成します。
+- 現時点で比較的強いのは `hotspots`、`thread hazard`、`shared mutable state`、`call/type/field graph` です。
 
-### AIエージェントへの導入手順
-AIエージェント（例：Claude Code, Antigravity）を使ってこのリポジトリを解析・改善させる際は、まず以下の手順を踏んでください。
+## 何がまだ弱いか
+- `deadcode` は heuristic ベースで、補助的な候補列挙です。
+- `reflection`、`DI`、`framework convention`、一部の `dispatch` はまだ完全ではありません。
+- そのため、`deadcode` の結果は削除判断に直結させず、AI や人間の二次確認を前提にしてください。
 
-1.  **指示書の読み込み**:
-    AIエージェントに対し、最初に `docs/AI_INSTRUCTIONS.md` を読むように指示してください。
-    > 「`docs/AI_INSTRUCTIONS.md` を読み、その指示に従って RepoGraph のツール類を使い、このリポジトリを解析してください。」
+## 構成
+1. `roslyn-cli/Probe`
+   C# 製の抽出器です。`.sln` / `.csproj` を解析して SQLite と graph JSON を出力します。
+2. `python-rag`
+   Python 製の分析器です。`hotspots`、`deadcode`、`query`、`build-index` を提供します。
 
-2.  **ツールの自律実行**:
-    `AI_INSTRUCTIONS.md` には、AIが自身で `Probe`（解析）や `Relay`（分析）を実行するための環境変数やコマンド、そして「ホットスポットの見極め方」が定義されています。
+## クイックスタート
+環境パスの前提は [docs/AI_INSTRUCTIONS.md](docs/AI_INSTRUCTIONS.md) を参照してください。
 
-3.  **証拠に基づく改善要求**:
-    AIは解析結果（`hotspots.md` や `field_access_graph.json`）を元に、「どのクラスのどのフィールドをカプセル化すべきか」といった、**エビデンスに基づいたリファクタリング案**を提示できるようになります。
+1. 解析を実行します。
+```powershell
+$env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
+& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" run --project C:\tmp\RepoGraph\roslyn-cli\Probe\Probe.csproj -- scan <TARGET_SLN_OR_CSPROJ> --output C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+```
 
-## 🌟 主な機能
-- **実行時コンテキスト抽出 (Probe)**: スレッド境界、フィールドアクセス、イベント購読の自動検知。
-- **スパゲッティ分析**: 複数クラスから操作される「共有可変状態」を特定し、AIに警告。
-- **高度なRAG (HNSW & Metadata Filtering)**: 大規模リポジトリ向けの高速ベクトル検索と、種類（Kind）やプロジェクト（Project）による属性フィルタリング。
-- **AIエージェント専用指示書 (`docs/AI_INSTRUCTIONS.md`)**: エージェントが自らツールを使いこなし、リポジトリを攻略するためのマニュアル。
+2. ホットスポットを生成します。
+```powershell
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+```
 
-## 🏗️ 構成
-1.  **roslyn-cli (Probe)**: C# 製。ソースコードからセマンティックグラフを抽出。
-2.  **python-rag (Relay)**: Python 製。グラフ解析、ベクトル検索、AI向け分析レポートの生成。
+3. 必要なら dead code 候補も生成します。
+```powershell
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py deadcode --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+```
 
-## 🚀 クイックスタート (Human & AI)
-1.  **Probe によるスキャン**:
-    ```powershell
-    dotnet run --project roslyn-cli/Probe/Probe.csproj -- scan <TARGET_PATH>
-    ```
-2.  **インデックス作成 (RAG)**:
-    ```powershell
-    python python-rag/main.py build-index
-    ```
-3.  **セマンティック検索**:
-    ```powershell
-    python python-rag/main.py query "カメラのオープン処理" --kind method
-    ```
-4.  **ホットスポット分析**:
-    ```powershell
-    python python-rag/main.py hotspots
-    ```
-5.  **AIへの丸投げ**: `AI_INSTRUCTIONS.md` を読ませ、あとはAIに「このリポジトリの改善点を見つけて修正して」と頼む。
+## 使いどころ
+- 巨大なレガシーコードの初期把握
+- 構造的に危険なクラスやメソッドの優先順位付け
+- 共有可変状態や UI / background thread 混在箇所の抽出
+- AI に探索の足場を与えるための前処理
 
-## ⚖️ License
+## 運用メモ
+- AI にこのリポジトリを触らせるときは、最初に [docs/AI_INSTRUCTIONS.md](docs/AI_INSTRUCTIONS.md) を読ませてください。
+- `deadcode` は便利ですが主役ではありません。まずは `hotspots` と graph の精度を優先して使う想定です。
+
+## License
 [MIT License](LICENSE)

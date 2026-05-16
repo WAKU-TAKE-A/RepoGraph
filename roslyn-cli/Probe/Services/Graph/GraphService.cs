@@ -205,7 +205,7 @@ SELECT s.id, s.fqn, s.kind,
 FROM symbols s
 LEFT JOIN documents d ON d.id = s.document_id
 LEFT JOIN projects p ON p.id = s.project_id
-WHERE s.kind = 'method' OR s.kind = 'constructor'";
+WHERE s.kind IN ('method', 'constructor', 'event', 'lambda', 'xaml')";
             using var readerNodes = await cmdNodes.ExecuteReaderAsync();
             var symbolIdToFqn = new Dictionary<string, string>();
             while (await readerNodes.ReadAsync())

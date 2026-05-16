@@ -2,6 +2,7 @@ using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -26,7 +27,10 @@ namespace Probe.Services.Analysis
                     var instances = MSBuildLocator.QueryVisualStudioInstances().ToList();
                     if (instances.Any())
                     {
-                        var instance = instances.OrderByDescending(x => x.Version).First();
+                        var instance = instances
+                            .OrderByDescending(x => IsSdkInstance(x.Name) ? 0 : 1)
+                            .ThenByDescending(x => x.Version)
+                            .First();
                         _logger.LogInformation("Registering MSBuild instance: {Name} {Version} from {Path}", 
                             instance.Name, instance.Version, instance.MSBuildPath);
                         MSBuildLocator.RegisterInstance(instance);
@@ -37,7 +41,22 @@ namespace Probe.Services.Analysis
                     }
                 }
 
-                var workspace = MSBuildWorkspace.Create();
+                var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["DesignTimeBuild"] = "true",
+                    ["BuildingInsideVisualStudio"] = "true",
+                    ["BuildProjectReferences"] = "false",
+                    ["SkipCompilerExecution"] = "true",
+                    ["ProvideCommandLineArgs"] = "true",
+                    ["AlwaysCompileMarkupFilesInSeparateDomain"] = "false",
+                    ["UseVSHostingProcess"] = "false",
+                    ["RunAnalyzers"] = "false",
+                    ["CodeAnalysisRuleSet"] = "",
+                    ["TreatWarningsAsErrors"] = "false"
+                };
+
+                var workspace = MSBuildWorkspace.Create(properties);
+                workspace.LoadMetadataForReferencedProjects = true;
 
                 _ = workspace.RegisterWorkspaceFailedHandler(e =>
                 {
@@ -65,6 +84,12 @@ namespace Probe.Services.Analysis
                 _logger.LogError(ex, "Failed to load workspace for {Path}", targetPath);
                 throw;
             }
+        }
+
+        private static bool IsSdkInstance(string? name)
+        {
+            return !string.IsNullOrWhiteSpace(name) &&
+                   name.Contains(".NET Core SDK", StringComparison.OrdinalIgnoreCase);
         }
     }
 }
