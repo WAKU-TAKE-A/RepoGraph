@@ -23,9 +23,11 @@ class SentenceTransformerProvider(EmbeddingProvider):
         return np.array(embeddings).astype("float32")
 
 class FaissIndexer:
-    def __init__(self, provider: EmbeddingProvider, output_dir: str):
+    def __init__(self, provider: EmbeddingProvider, output_dir: str, index_type: str = "HNSW", hnsw_m: int = 32):
         self.provider = provider
         self.output_dir = output_dir
+        self.index_type = index_type
+        self.hnsw_m = hnsw_m
         self.index = None
         self.metadata = {}
         os.makedirs(self.output_dir, exist_ok=True)
@@ -43,12 +45,14 @@ class FaissIndexer:
             for symbol in batch:
                 summary = summarizer.summarize_symbol(symbol)
                 summaries.append(summary)
-                # Store metadata for mapping back from FAISS vector ID (which is the list index)
-                vector_id = i + len(summaries) - 1
+                # Store metadata for mapping back from FAISS vector ID
+                vector_id = len(self.metadata)
                 self.metadata[str(vector_id)] = {
                     "id": symbol.id,
                     "fqn": symbol.fqn,
-                    "summary": summary
+                    "summary": summary,
+                    "kind": symbol.kind,
+                    "project_id": symbol.project_id
                 }
             
             embeddings = self.provider.embed(summaries)
@@ -59,10 +63,16 @@ class FaissIndexer:
             final_embeddings = np.vstack(all_embeddings)
             dimension = final_embeddings.shape[1]
             
-            # Use IndexFlatIP for cosine similarity (Inner Product with normalized vectors)
-            # SentenceTransformers mostly produce normalized vectors
-            self.index = faiss.IndexFlatIP(dimension)
+            # Normalize for inner product (cosine similarity)
             faiss.normalize_L2(final_embeddings)
+            
+            if self.index_type == "HNSW":
+                # HNSW Flat allows efficient approximate nearest neighbor search
+                self.index = faiss.IndexHNSWFlat(dimension, self.hnsw_m, faiss.METRIC_INNER_PRODUCT)
+            else:
+                # Fallback to exhaustive search
+                self.index = faiss.IndexFlatIP(dimension)
+
             self.index.add(final_embeddings)
             logger.info(f"FAISS index built with {self.index.ntotal} vectors of dimension {dimension}")
             self.save()

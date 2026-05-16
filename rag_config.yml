@@ -1,0 +1,18 @@
+database:
+  path: C:/tmp/RepoGraph/analysis_workspace/TargetProject/output/repository.db
+
+graphs:
+  directory: C:/tmp/RepoGraph/analysis_workspace/TargetProject/output/graphs
+
+output:
+  directory: C:/tmp/RepoGraph/analysis_workspace/TargetProject/output
+  embeddings_dir: C:/tmp/RepoGraph/analysis_workspace/TargetProject/output/embeddings
+
+embedding:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  batch_size: 64
+  device: cpu
+
+retrieval:
+  top_k: 20
+  graph_expansion_depth: 2

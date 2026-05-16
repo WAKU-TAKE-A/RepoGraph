@@ -2,7 +2,7 @@ import faiss
 import json
 import os
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from loguru import logger
 from index import EmbeddingProvider
 from graph import GraphLoader
@@ -30,7 +30,14 @@ class Retriever:
             
         logger.info(f"Loaded FAISS index with {self.index.ntotal} vectors.")
 
-    def search(self, query: str, top_k: int = 5, expansion_depth: int = 1) -> List[Dict[str, Any]]:
+    def search(
+        self, 
+        query: str, 
+        top_k: int = 5, 
+        expansion_depth: int = 1, 
+        filter_kind: Optional[str] = None,
+        filter_project_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         if not self.index:
             logger.error("FAISS index is not loaded.")
             return []
@@ -39,8 +46,33 @@ class Retriever:
         query_vector = self.provider.embed([query])
         faiss.normalize_L2(query_vector)
 
-        # Search FAISS
-        distances, indices = self.index.search(query_vector, top_k)
+        # Setup IDSelector for Pre-Filtering (Kind and/or Project)
+        sel = None
+        if filter_kind or filter_project_id:
+            allowed_ids = []
+            for vec_id_str, meta in self.metadata.items():
+                match_kind = True if not filter_kind else (meta.get("kind") == filter_kind)
+                match_project = True if not filter_project_id else (meta.get("project_id") == filter_project_id)
+                
+                if match_kind and match_project:
+                    allowed_ids.append(int(vec_id_str))
+            
+            if allowed_ids:
+                allowed_ids_arr = np.array(allowed_ids, dtype=np.int64)
+                sel = faiss.IDSelectorArray(allowed_ids_arr)
+            else:
+                logger.warning(f"No symbols found matching filter_kind='{filter_kind}' and filter_project_id='{filter_project_id}'")
+                return []
+
+        # Search FAISS with or without selector
+        if sel is not None:
+            if hasattr(faiss, 'SearchParametersIVF'):
+                search_params = faiss.SearchParametersIVF(sel=sel)
+            else:
+                search_params = faiss.SearchParameters(sel=sel)
+            distances, indices = self.index.search(query_vector, top_k, params=search_params)
+        else:
+            distances, indices = self.index.search(query_vector, top_k)
         
         results = []
         for dist, idx in zip(distances[0], indices[0]):
@@ -54,6 +86,8 @@ class Retriever:
                     "score": float(dist),
                     "id": meta["id"],
                     "fqn": meta["fqn"],
+                    "kind": meta.get("kind", ""),
+                    "project_id": meta.get("project_id", ""),
                     "summary": meta["summary"],
                     "context": []
                 }
@@ -73,7 +107,6 @@ class Retriever:
         # Expand via Call Graph
         if fqn in self.graph.call_graph:
             for _ in range(depth):
-                # immediate neighbors
                 callers = list(self.graph.call_graph.predecessors(fqn))
                 callees = list(self.graph.call_graph.successors(fqn))
                 for c in callers: context.add(f"Called by: {c}")
