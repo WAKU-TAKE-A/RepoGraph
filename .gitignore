@@ -6,6 +6,7 @@ SettingsOfThisPC.txt
 _sample/
 brain/
 save-ai-outputs.py
+plan/
 
 # Analysis Workspace (Output)
 analysis_workspace/
