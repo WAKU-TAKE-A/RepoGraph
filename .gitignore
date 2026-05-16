@@ -4,6 +4,8 @@ SettingsOfThisPC.txt
 
 # User Requested
 _sample/
+brain/
+save-ai-outputs.py
 
 # Analysis Workspace (Output)
 analysis_workspace/

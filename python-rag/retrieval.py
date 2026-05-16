@@ -42,11 +42,9 @@ class Retriever:
             logger.error("FAISS index is not loaded.")
             return []
 
-        # Embed query
         query_vector = self.provider.embed([query])
         faiss.normalize_L2(query_vector)
 
-        # Setup IDSelector for Pre-Filtering (Kind and/or Project)
         sel = None
         if filter_kind or filter_project_id:
             allowed_ids = []
@@ -64,7 +62,6 @@ class Retriever:
                 logger.warning(f"No symbols found matching filter_kind='{filter_kind}' and filter_project_id='{filter_project_id}'")
                 return []
 
-        # Search FAISS with or without selector
         if sel is not None:
             if hasattr(faiss, 'SearchParametersIVF'):
                 search_params = faiss.SearchParametersIVF(sel=sel)
@@ -92,7 +89,6 @@ class Retriever:
                     "context": []
                 }
                 
-                # Graph Expansion
                 if expansion_depth > 0:
                     context_symbols = self._expand_graph(meta["fqn"], expansion_depth)
                     result["context"] = context_symbols
@@ -119,5 +115,13 @@ class Retriever:
                 derived = list(self.graph.inheritance_graph.predecessors(fqn))
                 for b in bases: context.add(f"Inherits: {b}")
                 for d in derived: context.add(f"Inherited by: {d}")
+                
+        # Expand via Type Dependency Graph (New Feature Integration)
+        if hasattr(self.graph, 'type_dependency_graph') and fqn in self.graph.type_dependency_graph:
+            for _ in range(depth):
+                users = list(self.graph.type_dependency_graph.predecessors(fqn))
+                used_types = list(self.graph.type_dependency_graph.successors(fqn))
+                for u in users: context.add(f"Used as type by: {u}")
+                for u in used_types: context.add(f"Uses type: {u}")
                 
         return list(context)

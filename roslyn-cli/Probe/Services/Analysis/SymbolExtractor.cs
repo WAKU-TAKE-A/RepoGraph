@@ -90,7 +90,7 @@ namespace Probe.Services.Analysis
                     result.Inheritances.Add(new InheritanceData
                     {
                         DerivedId = symbolData.Fqn,
-                        BaseId = namedType.BaseType.ToDisplayString(),
+                        BaseId = namedType.BaseType.OriginalDefinition.ToDisplayString(),
                         Kind = "extends"
                     });
                 }
@@ -100,9 +100,26 @@ namespace Probe.Services.Analysis
                     result.Inheritances.Add(new InheritanceData
                     {
                         DerivedId = symbolData.Fqn,
-                        BaseId = iface.ToDisplayString(),
+                        BaseId = iface.OriginalDefinition.ToDisplayString(),
                         Kind = "implements"
                     });
+                }
+            }
+
+            if (symbol is IFieldSymbol field)
+            {
+                RecordTypeDependency(field.Type, symbolData.Fqn, result);
+            }
+            else if (symbol is IPropertySymbol prop)
+            {
+                RecordTypeDependency(prop.Type, symbolData.Fqn, result);
+            }
+            else if (symbol is IMethodSymbol method)
+            {
+                RecordTypeDependency(method.ReturnType, symbolData.Fqn, result);
+                foreach (var param in method.Parameters)
+                {
+                    RecordTypeDependency(param.Type, symbolData.Fqn, result);
                 }
             }
 
@@ -112,6 +129,64 @@ namespace Probe.Services.Analysis
                 ExtractThreadBoundaries(semanticModel, declarationNode, symbolData);
                 ExtractFieldAccesses(semanticModel, declarationNode, symbolData, result);
                 ExtractEventSubscriptions(semanticModel, declarationNode, symbolData, result);
+                ExtractTypeDependencies(semanticModel, declarationNode, symbolData, result);
+            }
+        }
+
+        private void RecordTypeDependency(ITypeSymbol? type, string sourceFqn, ExtractionResult result)
+        {
+            if (type == null) return;
+            
+            var targetFqn = type.OriginalDefinition.ToDisplayString();
+            if (targetFqn == "object" || targetFqn.StartsWith("System.")) return;
+
+            result.TypeDependencies.Add(new TypeDependencyData
+            {
+                SourceFqn = sourceFqn,
+                TargetFqn = targetFqn,
+                Kind = "type_usage"
+            });
+
+            if (type is INamedTypeSymbol namedType && namedType.IsGenericType)
+            {
+                foreach (var arg in namedType.TypeArguments)
+                {
+                    RecordTypeDependency(arg, sourceFqn, result);
+                }
+            }
+        }
+
+        private void ExtractTypeDependencies(SemanticModel semanticModel, SyntaxNode node, SymbolData symbolData, ExtractionResult result)
+        {
+            foreach (var typeNode in node.DescendantNodes().OfType<TypeSyntax>())
+            {
+                var typeInfo = semanticModel.GetTypeInfo(typeNode);
+                RecordTypeDependency(typeInfo.Type, symbolData.Fqn, result);
+            }
+
+            // Also check for 'new', 'as', 'is', and casts
+            foreach (var creation in node.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+            {
+                var symbolInfo = semanticModel.GetSymbolInfo(creation);
+                if (symbolInfo.Symbol is IMethodSymbol ctor)
+                {
+                    RecordTypeDependency(ctor.ContainingType, symbolData.Fqn, result);
+                }
+            }
+
+            foreach (var cast in node.DescendantNodes().OfType<CastExpressionSyntax>())
+            {
+                var typeInfo = semanticModel.GetTypeInfo(cast.Type);
+                RecordTypeDependency(typeInfo.Type, symbolData.Fqn, result);
+            }
+
+            foreach (var binary in node.DescendantNodes().OfType<BinaryExpressionSyntax>())
+            {
+                if (binary.IsKind(SyntaxKind.AsExpression) || binary.IsKind(SyntaxKind.IsExpression))
+                {
+                    var typeInfo = semanticModel.GetTypeInfo(binary.Right);
+                    RecordTypeDependency(typeInfo.Type, symbolData.Fqn, result);
+                }
             }
         }
 
@@ -515,6 +590,7 @@ namespace Probe.Services.Analysis
         public bool HasLock { get; set; }
         public bool HasThreadStart { get; set; }
         public bool HasBlockingWait { get; set; }
+        public int FanIn { get; set; }
     }
 
     public class MethodCallData
@@ -546,11 +622,19 @@ namespace Probe.Services.Analysis
         public string Kind { get; set; } = "";
     }
 
+    public class TypeDependencyData
+    {
+        public string SourceFqn { get; set; } = "";
+        public string TargetFqn { get; set; } = "";
+        public string Kind { get; set; } = "type_usage";
+    }
+
     public class ExtractionResult
     {
         public List<SymbolData> Symbols { get; set; } = new List<SymbolData>();
         public List<MethodCallData> MethodCalls { get; set; } = new List<MethodCallData>();
         public List<InheritanceData> Inheritances { get; set; } = new List<InheritanceData>();
         public List<FieldAccessData> FieldAccesses { get; set; } = new List<FieldAccessData>();
+        public List<TypeDependencyData> TypeDependencies { get; set; } = new List<TypeDependencyData>();
     }
 }

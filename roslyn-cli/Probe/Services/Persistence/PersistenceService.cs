@@ -89,14 +89,14 @@ INSERT OR IGNORE INTO symbols (
     is_generic, is_extension_method, is_disposable, is_volatile,
     line_start, line_end, loc, parameter_count, return_type,
     has_callback, has_ui_dispatch, has_task_spawn, has_background_worker,
-    has_do_events, has_lock, has_thread_start, has_blocking_wait
+    has_do_events, has_lock, has_thread_start, has_blocking_wait, fan_in
 ) VALUES (
     @id, @docId, @projId, @fqn, @name, @kind, @ns, @parent,
     @acc, @static, @abstract, @sealed, @async, @partial,
     @generic, @ext, @disposable, @volatile,
     @lstart, @lend, @loc, @pcount, @ret,
     @hascb, @uidisp, @taskspawn, @bgworker,
-    @doevents, @haslock, @threadstart, @blockingwait
+    @doevents, @haslock, @threadstart, @blockingwait, @fanin
 )";
             
             var pId = command.Parameters.Add("@id", SqliteType.Text);
@@ -130,6 +130,7 @@ INSERT OR IGNORE INTO symbols (
             var pHasLock = command.Parameters.Add("@haslock", SqliteType.Integer);
             var pThreadStart = command.Parameters.Add("@threadstart", SqliteType.Integer);
             var pBlockingWait = command.Parameters.Add("@blockingwait", SqliteType.Integer);
+            var pFanIn = command.Parameters.Add("@fanin", SqliteType.Integer);
 
             foreach (var data in symbols)
             {
@@ -164,6 +165,7 @@ INSERT OR IGNORE INTO symbols (
                 pHasLock.Value = data.HasLock ? 1 : 0;
                 pThreadStart.Value = data.HasThreadStart ? 1 : 0;
                 pBlockingWait.Value = data.HasBlockingWait ? 1 : 0;
+                pFanIn.Value = data.FanIn;
                 await command.ExecuteNonQueryAsync();
             }
             await transaction.CommitAsync();
@@ -280,6 +282,34 @@ WHERE s1.fqn = @derivedFqn AND s2.fqn = @baseFqn";
             await transaction.CommitAsync();
         }
 
+        public async Task SaveTypeDependenciesAsync(IEnumerable<TypeDependencyData> dependencies)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+
+            command.CommandText = @"
+INSERT OR IGNORE INTO symbol_relationships (source_id, target_id, relationship_type)
+SELECT s1.id, s2.id, @kind
+FROM symbols s1, symbols s2
+WHERE s1.fqn = @sourceFqn AND s2.fqn = @targetFqn";
+
+            var pSource = command.Parameters.Add("@sourceFqn", SqliteType.Text);
+            var pTarget = command.Parameters.Add("@targetFqn", SqliteType.Text);
+            var pKind = command.Parameters.Add("@kind", SqliteType.Text);
+
+            foreach (var dep in dependencies)
+            {
+                pSource.Value = dep.SourceFqn;
+                pTarget.Value = dep.TargetFqn;
+                pKind.Value = dep.Kind;
+                await command.ExecuteNonQueryAsync();
+            }
+            await transaction.CommitAsync();
+        }
+
         public async Task SaveProjectAsync(string id, string solutionId, string runId, string name, string path)
         {
             using var connection = new SqliteConnection(_connectionString);
@@ -358,6 +388,31 @@ VALUES (@id, @rid, @path, @name)";
             command.Parameters.AddWithValue("@path", path);
             command.Parameters.AddWithValue("@name", name);
             await command.ExecuteNonQueryAsync();
+        }
+
+        public async Task UpdateMetricsAsync()
+        {
+            _logger.LogInformation("Calculating symbol metrics (fan-in)...");
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+
+            command.CommandText = @"
+UPDATE symbols
+SET fan_in = (
+    SELECT COUNT(*) FROM method_calls mc WHERE mc.callee_id = symbols.id
+) + (
+    SELECT COUNT(*) FROM inheritance i WHERE i.base_id = symbols.id
+) + (
+    SELECT COUNT(*) FROM field_accesses fa WHERE fa.target_fqn = symbols.fqn
+) + (
+    SELECT COUNT(*) FROM symbol_relationships sr WHERE sr.target_id = symbols.id
+)";
+            await command.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+            _logger.LogInformation("Metrics updated.");
         }
     }
 }

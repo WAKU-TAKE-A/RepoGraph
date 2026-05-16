@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS symbols (
     has_lock             INTEGER NOT NULL DEFAULT 0,
     has_thread_start     INTEGER NOT NULL DEFAULT 0,
     has_blocking_wait    INTEGER NOT NULL DEFAULT 0,
+    fan_in               INTEGER NOT NULL DEFAULT 0,
     UNIQUE (fqn),
     FOREIGN KEY (document_id) REFERENCES documents(id),
     FOREIGN KEY (project_id) REFERENCES projects(id)

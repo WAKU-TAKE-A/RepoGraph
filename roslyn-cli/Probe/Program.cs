@@ -154,6 +154,11 @@ namespace Probe
                                 {
                                     await persistence.SaveFieldAccessesAsync(result.FieldAccesses);
                                 }
+
+                                if (result.TypeDependencies.Any())
+                                {
+                                    await persistence.SaveTypeDependenciesAsync(result.TypeDependencies);
+                                }
                             }
                             catch (Exception ex)
                             {
@@ -188,6 +193,8 @@ namespace Probe
                 {
                     await persistence.SaveProjectDependenciesAsync(projectDependencies);
                 }
+
+                await persistence.UpdateMetricsAsync();
 
                 logger.LogInformation("Generating graphs...");
                 var graphOutputDir = Path.Combine(output, "output", "graphs");

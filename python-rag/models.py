@@ -71,6 +71,7 @@ class Symbol(Base):
     has_lock = Column(Integer)
     has_thread_start = Column(Integer)
     has_blocking_wait = Column(Integer)
+    fan_in = Column(Integer)
 
 class FieldAccess(Base):
     __tablename__ = "field_accesses"

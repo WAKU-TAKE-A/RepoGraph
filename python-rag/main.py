@@ -7,6 +7,7 @@ from loguru import logger
 from models import Base, Symbol
 from graph import GraphLoader
 from hotspots import HotspotScorer
+from deadcode import DeadCodeDetector
 import networkx as nx
 import json
 
@@ -58,23 +59,18 @@ def build_index(workspace: str = typer.Option(None, "--workspace", "-w", help="O
     index_type = faiss_config.get("index_type", "HNSW")
     hnsw_m = faiss_config.get("hnsw_m", 32)
     
-    # 1. Load Graphs
     graph_loader = GraphLoader(graphs_dir)
     graph_loader.load_all()
     
-    # 2. Init DB session
     engine = create_engine(f"sqlite:///{db_path}")
     Session = sessionmaker(bind=engine)
     session = Session()
     
-    # 3. Setup Summarizer
     summarizer = Summarizer(graph_loader)
     
-    # 4. Setup Embedding Provider & Indexer
     provider = SentenceTransformerProvider(model_name, device=device)
     indexer = FaissIndexer(provider, out_dir, index_type=index_type, hnsw_m=hnsw_m)
     
-    # 5. Build Index
     indexer.build_index(session, summarizer, batch_size=batch_size)
     
     logger.info("Index build completed successfully.")
@@ -137,6 +133,31 @@ def hotspots(workspace: str = typer.Option(None, "--workspace", "-w", help="Over
 
     scorer = HotspotScorer(session, graph_loader, reports_dir)
     scorer.generate_reports()
+
+@app.command()
+def deadcode(workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory")):
+    """Generate a list of dead code candidates."""
+    config = load_config()
+    db_path = os.path.join(workspace, "output", "repository.db") if workspace else config.get("database", {}).get("path", "")
+    graphs_dir = os.path.join(workspace, "output", "graphs") if workspace else config.get("graphs", {}).get("directory", "")
+    reports_dir = os.path.join(workspace, "output", "reports") if workspace else os.path.join(config.get("output", {}).get("directory", ""), "reports")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    # Load graphs (including new type_dependency_graph if available from C# side)
+    graph_loader = GraphLoader(graphs_dir)
+    try:
+        # Graceful load in case C# side isn't updated yet
+        graph_loader.load_all() 
+        if not hasattr(graph_loader, 'type_dependency_graph'):
+            logger.warning("type_dependency_graph not found. Dead code detection will proceed with Call and Inheritance graphs only.")
+    except Exception as e:
+        logger.error(f"Error loading graphs: {e}")
+
+    detector = DeadCodeDetector(session, graph_loader, reports_dir)
+    detector.generate_report()
 
 if __name__ == "__main__":
     app()

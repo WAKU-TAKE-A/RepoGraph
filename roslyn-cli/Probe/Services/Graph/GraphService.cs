@@ -29,6 +29,54 @@ namespace Probe.Services.Graph
             await ExportInheritanceGraphAsync(runId);
             await ExportCallGraphAsync(runId);
             await ExportFieldAccessGraphAsync(runId);
+            await ExportTypeDependencyGraphAsync(runId);
+        }
+
+        private async Task ExportTypeDependencyGraphAsync(string runId)
+        {
+            var nodes = new List<object>();
+            var links = new List<object>();
+
+            using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var cmdNodes = connection.CreateCommand();
+            cmdNodes.CommandText = @"
+SELECT s.id, s.fqn, s.kind, COALESCE(d.file_path, ''), COALESCE(p.name, '')
+FROM symbols s
+LEFT JOIN documents d ON d.id = s.document_id
+LEFT JOIN projects p ON p.id = s.project_id";
+            using var readerNodes = await cmdNodes.ExecuteReaderAsync();
+            var symbolIdToFqn = new Dictionary<string, string>();
+            while (await readerNodes.ReadAsync())
+            {
+                var id = readerNodes.GetString(0);
+                var fqn = readerNodes.GetString(1);
+                var kind = readerNodes.GetString(2);
+                var filePath = readerNodes.GetString(3);
+                var projectName = readerNodes.GetString(4);
+                symbolIdToFqn[id] = fqn;
+                
+                nodes.Add(new { id = fqn, kind = kind, file = filePath, project = projectName });
+            }
+
+            using var cmdEdges = connection.CreateCommand();
+            cmdEdges.CommandText = "SELECT source_id, target_id, relationship_type FROM symbol_relationships";
+            using var readerEdges = await cmdEdges.ExecuteReaderAsync();
+            while (await readerEdges.ReadAsync())
+            {
+                var sourceId = readerEdges.GetString(0);
+                var targetId = readerEdges.GetString(1);
+                var type = readerEdges.GetString(2);
+
+                if (symbolIdToFqn.TryGetValue(sourceId, out var sourceFqn) && 
+                    symbolIdToFqn.TryGetValue(targetId, out var targetFqn))
+                {
+                    links.Add(new { source = sourceFqn, target = targetFqn, type = type });
+                }
+            }
+
+            await WriteJsonAsync("type_dependency_graph.json", "type_dependency", runId, nodes, links);
         }
 
         private async Task ExportDependencyGraphAsync(string runId)
