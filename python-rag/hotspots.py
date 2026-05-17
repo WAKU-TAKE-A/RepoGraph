@@ -190,12 +190,20 @@ class HotspotScorer:
         if not field_accesses:
             logger.info("No field accesses found.")
             return []
+        if not owned_targets:
+            logger.warning(
+                "Field accesses exist (%d rows), but no owned field/property symbols were loaded.",
+                len(field_accesses),
+            )
+            return []
 
         # Group by target field
         target_writers: Dict[str, Dict[str, Any]] = {}
+        owned_access_count = 0
         for fa in field_accesses:
             if fa.target_fqn not in owned_targets:
                 continue
+            owned_access_count += 1
 
             if fa.target_fqn not in target_writers:
                 target_writers[fa.target_fqn] = {
@@ -220,6 +228,13 @@ class HotspotScorer:
 
             if fa.access_kind in ("read", "read_write"):
                 target_writers[fa.target_fqn]["readers"].add(fa.accessor_fqn)
+
+        if owned_access_count == 0:
+            logger.warning(
+                "Field accesses exist (%d rows), but none target owned field/property symbols.",
+                len(field_accesses),
+            )
+            return []
 
         # Find fields with multiple writers (dangerous shared state)
         shared_state = []
@@ -268,6 +283,12 @@ class HotspotScorer:
 
         # Sort by risk_score descending
         shared_state.sort(key=lambda x: (x["risk_score"], x["writer_count"]), reverse=True)
+        if not shared_state:
+            logger.info(
+                "Processed %d owned field/property accesses across %d targets, but no multi-writer shared state was found.",
+                owned_access_count,
+                len(target_writers),
+            )
         return shared_state
 
     def _is_test_symbol(self, symbol: Symbol) -> bool:

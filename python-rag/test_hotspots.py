@@ -143,6 +143,21 @@ class HotspotScorerTests(unittest.TestCase):
 
         self.assertTrue(load_method["is_threading_hazard"])
 
+    def test_generate_reports_includes_shared_mutable_state_section_when_present(self) -> None:
+        loader = GraphLoader(str(self.workspace))
+        loader.load_all()
+        scorer = HotspotScorer(self.session, loader, str(self.reports_dir))
+
+        scorer.generate_reports()
+
+        markdown = (self.reports_dir / "hotspots.md").read_text(encoding="utf-8")
+        payload = json.loads((self.reports_dir / "hotspots.json").read_text(encoding="utf-8"))
+
+        self.assertIn("## 🔴 Shared Mutable State (Runtime/Event — High Risk)", markdown)
+        self.assertIn("App.State.Value", markdown)
+        self.assertEqual(len(payload["shared_mutable_state"]), 1)
+        self.assertEqual(payload["shared_mutable_state"][0]["target_fqn"], "App.State.Value")
+
 
 if __name__ == "__main__":
     unittest.main()
