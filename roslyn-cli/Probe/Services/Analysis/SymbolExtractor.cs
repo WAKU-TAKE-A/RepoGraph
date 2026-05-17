@@ -733,53 +733,93 @@ namespace Probe.Services.Analysis
                     continue;
                 }
 
-                var containingTypeName = calledMethod.ContainingType?.Name ?? "";
-                var containingNamespace = calledMethod.ContainingNamespace?.ToDisplayString() ?? "";
-                if (string.Equals(calledMethod.Name, "RegisterAll", StringComparison.Ordinal) &&
-                    containingNamespace.Contains("Toolkit.Mvvm.Messaging", StringComparison.Ordinal) &&
-                    (containingTypeName.Contains("Messenger", StringComparison.Ordinal) ||
-                     containingTypeName.Contains("Extensions", StringComparison.Ordinal)))
-                {
-                    foreach (var receiveMethod in compilationCache.GetMethodCandidates(symbolData.ContainingType ?? "", "Receive", 1))
-                    {
-                        result.MethodCalls.Add(new MethodCallData
-                        {
-                            CallerId = symbolData.Fqn,
-                            CalleeId = receiveMethod,
-                            CallCount = 1,
-                            CallType = "framework_dispatch"
-                        });
-                    }
-
-                    continue;
-                }
-
-                if (!string.Equals(calledMethod.Name, "RegisterAssemblyModules", StringComparison.Ordinal))
+                if (TryExtractMvvmToolkitMessagingDispatch(compilationCache, calledMethod, symbolData, result))
                 {
                     continue;
                 }
 
-                foreach (var moduleType in compilationCache.GetAutofacModuleTypes())
+                if (TryExtractAutofacModuleDispatch(compilationCache, calledMethod, symbolData, result))
                 {
-                    result.TypeDependencies.Add(new TypeDependencyData
-                    {
-                        SourceFqn = symbolData.Fqn,
-                        TargetFqn = moduleType,
-                        Kind = "reflection_registration"
-                    });
-                }
-
-                foreach (var loadMethod in compilationCache.GetAutofacModuleLoadMethods())
-                {
-                    result.MethodCalls.Add(new MethodCallData
-                    {
-                        CallerId = symbolData.Fqn,
-                        CalleeId = loadMethod,
-                        CallCount = 1,
-                        CallType = "framework_dispatch"
-                    });
+                    continue;
                 }
             }
+        }
+
+        private static bool TryExtractMvvmToolkitMessagingDispatch(
+            CompilationAnalysisCache compilationCache,
+            IMethodSymbol calledMethod,
+            SymbolData symbolData,
+            ExtractionResult result)
+        {
+            if (!IsMvvmToolkitRegisterAll(calledMethod))
+            {
+                return false;
+            }
+
+            foreach (var receiveMethod in compilationCache.GetMethodCandidates(symbolData.ContainingType ?? "", "Receive", 1))
+            {
+                result.MethodCalls.Add(new MethodCallData
+                {
+                    CallerId = symbolData.Fqn,
+                    CalleeId = receiveMethod,
+                    CallCount = 1,
+                    CallType = "mvvm_toolkit_message_dispatch"
+                });
+            }
+
+            return true;
+        }
+
+        private static bool TryExtractAutofacModuleDispatch(
+            CompilationAnalysisCache compilationCache,
+            IMethodSymbol calledMethod,
+            SymbolData symbolData,
+            ExtractionResult result)
+        {
+            if (!IsAutofacRegisterAssemblyModules(calledMethod))
+            {
+                return false;
+            }
+
+            foreach (var moduleType in compilationCache.GetAutofacModuleTypes())
+            {
+                result.TypeDependencies.Add(new TypeDependencyData
+                {
+                    SourceFqn = symbolData.Fqn,
+                    TargetFqn = moduleType,
+                    Kind = "autofac_reflection_registration"
+                });
+            }
+
+            foreach (var loadMethod in compilationCache.GetAutofacModuleLoadMethods())
+            {
+                result.MethodCalls.Add(new MethodCallData
+                {
+                    CallerId = symbolData.Fqn,
+                    CalleeId = loadMethod,
+                    CallCount = 1,
+                    CallType = "autofac_module_load"
+                });
+            }
+
+            return true;
+        }
+
+        private static bool IsMvvmToolkitRegisterAll(IMethodSymbol calledMethod)
+        {
+            var containingTypeName = calledMethod.ContainingType?.Name ?? "";
+            var containingNamespace = calledMethod.ContainingNamespace?.ToDisplayString() ?? "";
+            return string.Equals(calledMethod.Name, "RegisterAll", StringComparison.Ordinal)
+                && containingNamespace.Contains("Toolkit.Mvvm.Messaging", StringComparison.Ordinal)
+                && (containingTypeName.Contains("Messenger", StringComparison.Ordinal)
+                    || containingTypeName.Contains("Extensions", StringComparison.Ordinal));
+        }
+
+        private static bool IsAutofacRegisterAssemblyModules(IMethodSymbol calledMethod)
+        {
+            var containingNamespace = calledMethod.ContainingNamespace?.ToDisplayString() ?? "";
+            return string.Equals(calledMethod.Name, "RegisterAssemblyModules", StringComparison.Ordinal)
+                && containingNamespace.Contains("Autofac", StringComparison.Ordinal);
         }
 
         private void ExtractDelegateReferences(SemanticModel semanticModel, SyntaxNode node, SymbolData symbolData, ExtractionResult result)

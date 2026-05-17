@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict
+from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 from models import Project, Symbol
 from graph import GraphLoader
@@ -18,12 +18,14 @@ class DeadCodeDetector:
             for (project_id,) in self.session.query(Project.id).filter(Project.is_test_project == 1).all()
         }
         self._symbols_by_containing_type: Dict[str, List[Symbol]] = {}
+        self._suppressed_by_rule: Dict[str, int] = {}
         for symbol in self.session.query(Symbol).all():
             if symbol.containing_type:
                 self._symbols_by_containing_type.setdefault(symbol.containing_type, []).append(symbol)
 
     def detect_dead_code_candidates(self) -> List[Dict]:
         candidates = []
+        self._suppressed_by_rule = {}
         # fan_in == 0 のシンボルを取得（明示的なメソッド呼び出しがないもの）
         symbols = self.session.query(Symbol).filter(Symbol.fan_in == 0).all()
         
@@ -33,7 +35,9 @@ class DeadCodeDetector:
             file_path = sym.document.file_path if sym.document else ""
             file_name = sym.document.file_name if sym.document else ""
 
-            if sym.kind in {"xaml", "lambda", "framework_method"}:
+            suppression = self._get_convention_suppression(sym, file_path)
+            if suppression:
+                self._record_suppression(suppression)
                 continue
 
             # 0. テスト資産は entrypoint / assertion / attribute / runner 規約が強く、静的参照だけで死活判定しにくい
@@ -61,7 +65,9 @@ class DeadCodeDetector:
                     
             # 2. 継承グラフ（Inheritance）によるセーフティネット
             if sym.kind in ["class", "interface"]:
-                if self._looks_like_framework_convention_type(sym):
+                suppression = self._get_convention_suppression(sym, file_path)
+                if suppression:
+                    self._record_suppression(suppression)
                     continue
 
                 if self._type_has_live_members(sym):
@@ -83,47 +89,9 @@ class DeadCodeDetector:
                 if self._looks_like_accessor_method(sym):
                     continue
 
-                if self._looks_like_message_recipient_method(sym):
-                    continue
-
-                if self._looks_like_explicit_interface_method(sym):
-                    continue
-
-                if self._looks_like_framework_convention_method(sym):
-                    continue
-
-                if self._looks_like_host_integration_method(sym, file_path):
-                    continue
-
-                if self._looks_like_partial_ui_event_handler(sym):
-                    continue
-
-                if sym.containing_type and self._looks_like_ui_type_name(sym.containing_type):
-                    if any(sig in fqn_lower for sig in [
-                        "(object, system.eventargs)",
-                        "(object, system.windows.forms.",
-                        "(object, halcondotnet.",
-                        "(object, system.componentmodel."
-                    ]):
-                        continue
-
-                # 一般的なUIイベントハンドラのサフィックス
-                if any(evt in fqn_lower for evt in [
-                    "_click(", "_load(", "_changed(", "_tick(", "_shown(",
-                    "_checkedchanged(", "_selectedindexchanged(", "_textchanged(",
-                    "_valuechanged(", "_formclosed(", "_formclosing(", "_resize(",
-                    "_paint(", "_dragdrop(", "_dragenter(", "_keydown(",
-                    "_keyup(", "_keypress(", "_dowork(", "_runworkercompleted(",
-                    "_progresschanged(", "_mouseup(", "_mousedown(",
-                    "_mousemove(", "_doubleclick(", "_afterselect(",
-                    "_cellcontentclick(", "_elapsed("
-                ]):
-                    continue
-                # 一般的なフレームワークライフサイクル
-                if any(sys in fqn_lower for sys in [
-                    ".dispose(", ".wndproc(", ".onpaint(", ".onload(",
-                    ".onshown(", ".onclosing(", ".onclosed(", ".initializecomponent("
-                ]):
+                suppression = self._get_convention_suppression(sym, file_path)
+                if suppression:
+                    self._record_suppression(suppression)
                     continue
             candidates.append({
                 "fqn": sym.fqn,
@@ -158,6 +126,15 @@ class DeadCodeDetector:
             f.write(f"- `isolated`: {category_counts['isolated']} candidates with weak or no nearby matches\n")
             f.write(f"- `structural-sibling`: {category_counts['structural-sibling']} candidates with some structural similarity nearby\n")
             f.write(f"- `near-family`: {category_counts['near-family']} candidates that strongly resemble existing family members or variants\n\n")
+            if self._suppressed_by_rule:
+                f.write("## Suppressed Convention Patterns\n\n")
+                f.write("> These symbols were not listed as dead-code candidates because they match known framework or language conventions.\n")
+                f.write("> Rule IDs are intentionally explicit so reviewers can see whether a suppression came from .NET hosting, XAML UI, MVVM, ASP.NET, DI, or serialization.\n\n")
+                f.write("| Rule | Count |\n")
+                f.write("|------|-------|\n")
+                for rule_id, count in sorted(self._suppressed_by_rule.items()):
+                    f.write(f"| `{rule_id}` | {count} |\n")
+                f.write("\n")
             f.write("| Rank | Category | Related | LOC | Kind | Why It Looks Isolated | Symbol (FQN) | File |\n")
             f.write("|------|----------|---------|-----|------|------------------------|--------------|------|\n")
             for i, c in enumerate(candidates, 1):
@@ -206,7 +183,10 @@ class DeadCodeDetector:
 
         with open(json_path, "w", encoding="utf-8") as f:
             import json
-            json.dump({"candidates": candidates}, f, indent=2, ensure_ascii=False)
+            json.dump({
+                "candidates": candidates,
+                "suppressed_by_rule": self._suppressed_by_rule,
+            }, f, indent=2, ensure_ascii=False)
                 
         logger.info(f"Generated dead code report with {len(candidates)} candidates at {report_path}")
 
@@ -335,6 +315,211 @@ class DeadCodeDetector:
         )
         return ", ".join(f"{label}={signals.get(key, 0)}" for key, label in labels if key in signals)
 
+    def _record_suppression(self, rule_id: str) -> None:
+        self._suppressed_by_rule[rule_id] = self._suppressed_by_rule.get(rule_id, 0) + 1
+
+    def _get_convention_suppression(self, sym: Symbol, file_path: str) -> Optional[str]:
+        if sym.kind in {"xaml", "lambda", "framework_method"}:
+            return f"repograph.{sym.kind}"
+
+        if sym.kind in {"class", "interface"}:
+            return self._get_type_convention_rule(sym, file_path)
+
+        if sym.kind != "method":
+            return None
+
+        for detector in (
+            self._get_dotnet_lifecycle_rule,
+            self._get_ui_framework_rule,
+            self._get_mvvm_rule,
+            self._get_aspnet_hosting_rule,
+            self._get_di_container_rule,
+            self._get_serialization_rule,
+        ):
+            rule_id = detector(sym, file_path)
+            if rule_id:
+                return rule_id
+
+        if self._looks_like_explicit_interface_method(sym):
+            return "dotnet.explicit_interface_implementation"
+
+        return None
+
+    @staticmethod
+    def _get_type_convention_rule(sym: Symbol, file_path: str = "") -> Optional[str]:
+        name = (sym.name or "").split(".")[-1]
+        path_lower = file_path.lower()
+        if name in {"App", "Program", "Startup"}:
+            return "dotnet.host_entry_type"
+        if name.endswith(("Controller", "Middleware", "ActionFilter")) and any(
+            marker in path_lower for marker in ("\\controllers\\", "\\middleware\\", "\\filters\\")
+        ):
+            return "aspnet.convention_type"
+        if name.endswith(("Module",)):
+            return "di.module_type"
+        if name.endswith(("Converter",)):
+            return "serialization.converter_type"
+        if name.endswith(("Behavior", "Extension", "Extensions", "ExtensionMethods")):
+            return "dotnet.extension_or_behavior_type"
+        return None
+
+    @staticmethod
+    def _get_dotnet_lifecycle_rule(sym: Symbol, file_path: str) -> Optional[str]:
+        del file_path
+        name = (sym.name or "").lower()
+        fqn_lower = (sym.fqn or "").lower()
+
+        if name in {"main", "mainasync", "dispose"}:
+            return "dotnet.lifecycle_method"
+
+        if any(token in fqn_lower for token in (
+            ".dispose(", ".wndproc(", ".initializecomponent("
+        )):
+            return "dotnet.lifecycle_method"
+
+        return None
+
+    def _get_ui_framework_rule(self, sym: Symbol, file_path: str) -> Optional[str]:
+        name = sym.name or ""
+        name_lower = name.lower()
+        containing_type = (sym.containing_type or "").split(".")[-1].lower()
+        fqn_lower = (sym.fqn or "").lower()
+        file_path_lower = file_path.lower()
+
+        if name_lower in {
+            "onstartup", "oninitialize", "onactivated", "onapplytemplate",
+            "onframeworkinitializationcompleted",
+            "render", "drawitem", "ondrawitem", "onrender", "onupdate",
+            "onpointerpressed", "onpointermoved", "onpointerreleased",
+            "onkeydown", "onkeyup", "ontextinput", "onloaded",
+            "onselectionchanged", "onviewmodelpropertychanged",
+        }:
+            return "ui.lifecycle_or_render_callback"
+
+        if name_lower in {"render", "drawitem", "onupdate"} and containing_type.endswith((
+            "renderer", "shape", "annotation", "control", "tool"
+        )):
+            return "ui.render_callback"
+
+        if (file_path_lower.endswith(".axaml.cs") or file_path_lower.endswith(".xaml.cs")) and name.startswith("On"):
+            return "xaml.codebehind_callback"
+
+        if self._looks_like_partial_ui_event_handler(sym):
+            return "xaml.partial_event_handler"
+
+        if name_lower.endswith("propertychanged") and "(dependencyobject, dependencypropertychangedeventargs)" in fqn_lower:
+            return "xaml.dependency_property_callback"
+
+        if sym.containing_type and self._looks_like_ui_type_name(sym.containing_type):
+            if self._looks_like_ui_event_signature(fqn_lower):
+                return "ui.event_handler_signature"
+
+            if any(evt in fqn_lower for evt in (
+                "_click(", "_load(", "_changed(", "_tick(", "_shown(",
+                "_checkedchanged(", "_selectedindexchanged(", "_textchanged(",
+                "_valuechanged(", "_formclosed(", "_formclosing(", "_resize(",
+                "_paint(", "_dragdrop(", "_dragenter(", "_keydown(",
+                "_keyup(", "_keypress(", "_dowork(", "_runworkercompleted(",
+                "_progresschanged(", "_mouseup(", "_mousedown(",
+                "_mousemove(", "_doubleclick(", "_afterselect(",
+                "_cellcontentclick(", "_elapsed("
+            )):
+                return "ui.event_handler_name"
+
+        if any(token in fqn_lower for token in (
+            ".onpaint(", ".onload(", ".onshown(", ".onclosing(", ".onclosed("
+        )):
+            return "ui.lifecycle_method"
+
+        return None
+
+    def _get_mvvm_rule(self, sym: Symbol, file_path: str) -> Optional[str]:
+        del file_path
+        name = (sym.name or "").lower()
+        containing_type = (sym.containing_type or "").split(".")[-1].lower()
+
+        if self._looks_like_message_recipient_method(sym):
+            return "mvvm.message_recipient"
+
+        if name.startswith("handle") and containing_type.endswith(("behavior", "adapter")):
+            return "mvvm.behavior_callback"
+
+        if self._looks_like_command_method(sym):
+            return "mvvm.command_method"
+
+        return None
+
+    @staticmethod
+    def _get_aspnet_hosting_rule(sym: Symbol, file_path: str) -> Optional[str]:
+        name = (sym.name or "").lower()
+        containing_type = (sym.containing_type or "").split(".")[-1].lower()
+        path_lower = file_path.lower()
+
+        if name in {"invoke", "invokeasync"} and (
+            containing_type.endswith("middleware")
+            or "\\middleware\\" in path_lower
+        ):
+            return "aspnet.middleware_invoke"
+
+        if name.startswith("use") and containing_type.endswith(("extensions", "middleware")):
+            return "aspnet.pipeline_extension"
+
+        if name in {"configure", "configureservices"} and containing_type == "startup":
+            return "aspnet.startup_method"
+
+        if name in {"onactionexecuting", "onactionexecuted"} and (
+            containing_type.endswith("filter")
+            or "\\controllers\\" in path_lower
+            or "\\filters\\" in path_lower
+        ):
+            return "aspnet.action_filter_callback"
+
+        if "\\controllers\\" in path_lower and containing_type.endswith("controller"):
+            if (sym.accessibility or "").lower() == "public":
+                return "aspnet.controller_action"
+
+        if name.startswith("map") and (
+            containing_type.endswith(("endpoint", "endpoints", "extensions"))
+            or "\\endpoints\\" in path_lower
+        ):
+            return "aspnet.endpoint_mapping"
+
+        if name.startswith("create") and containing_type.endswith(("webserver", "host", "builder")):
+            return "dotnet.host_builder_factory"
+
+        return None
+
+    @staticmethod
+    def _get_di_container_rule(sym: Symbol, file_path: str) -> Optional[str]:
+        del file_path
+        name = (sym.name or "").lower()
+        containing_type = (sym.containing_type or "").split(".")[-1].lower()
+
+        if name == "load" and containing_type.endswith("module"):
+            return "di.module_load"
+
+        if name in {"configure", "configureservices"}:
+            return "di.service_configuration"
+
+        return None
+
+    @staticmethod
+    def _get_serialization_rule(sym: Symbol, file_path: str) -> Optional[str]:
+        del file_path
+        name = (sym.name or "").lower()
+        containing_type = (sym.containing_type or "").split(".")[-1].lower()
+
+        if name in {"convert", "convertback"}:
+            return "ui.value_converter"
+
+        if containing_type.endswith(("converter", "contractresolver")) and name in {
+            "readjson", "writejson", "canconvert", "createproperty",
+            "createdictionarycontract", "createcontract"
+        }:
+            return "serialization.callback_method"
+
+        return None
+
     @staticmethod
     def _looks_like_ui_type(sym: Symbol) -> bool:
         name = sym.name or ""
@@ -350,11 +535,7 @@ class DeadCodeDetector:
 
     @staticmethod
     def _looks_like_framework_convention_type(sym: Symbol) -> bool:
-        name = (sym.name or "").split(".")[-1]
-        return name in {"App", "Program", "Startup"} or name.endswith((
-            "Module", "Converter", "Behavior", "Extension", "Extensions", "ExtensionMethods",
-            "Controller", "Middleware", "ActionFilter"
-        ))
+        return DeadCodeDetector._get_type_convention_rule(sym) is not None
 
     @staticmethod
     def _looks_like_ui_type_name(name: str) -> bool:
@@ -370,46 +551,8 @@ class DeadCodeDetector:
 
     @staticmethod
     def _looks_like_framework_convention_method(sym: Symbol) -> bool:
-        name = (sym.name or "").lower()
-        containing_type = (sym.containing_type or "").split(".")[-1].lower()
-        file_path = sym.document.file_path.lower() if sym.document and sym.document.file_path else ""
-        callback_names = {
-            "render", "drawitem", "ondrawitem", "onrender", "onupdate",
-            "onpointerpressed", "onpointermoved", "onpointerreleased",
-            "onkeydown", "onkeyup", "ontextinput", "onloaded",
-            "onselectionchanged", "onviewmodelpropertychanged",
-        }
-
-        if name in {
-            "onstartup", "oninitialize", "onactivated", "onapplytemplate",
-            "onframeworkinitializationcompleted",
-            "convert", "convertback", "load",
-            "configure", "configureservices",
-            "onactionexecuting", "onactionexecuted"
-        }:
-            return True
-
-        if name.startswith("handle") and containing_type.endswith(("behavior", "adapter")):
-            return True
-
-        if name.endswith("propertychanged") and "(dependencyobject, dependencypropertychangedeventargs)" in (sym.fqn or "").lower():
-            return True
-
-        if name == "save" and containing_type.endswith("viewmodel"):
-            return True
-
-        if (file_path.endswith(".axaml.cs") or file_path.endswith(".xaml.cs")) and name.startswith("on"):
-            return True
-
-        if name in callback_names:
-            return True
-
-        if name in {"render", "drawitem", "onupdate"} and containing_type.endswith((
-            "renderer", "shape", "annotation", "control", "tool"
-        )):
-            return True
-
-        return False
+        file_path = sym.document.file_path if sym.document and sym.document.file_path else ""
+        return DeadCodeDetector._get_serialization_rule(sym, file_path) is not None
 
     def _looks_like_message_recipient_method(self, sym: Symbol) -> bool:
         name = (sym.name or "").lower()
@@ -417,7 +560,10 @@ class DeadCodeDetector:
         if name != "receive":
             return False
 
-        if ".messages." in fqn_lower:
+        if ".messages." in fqn_lower or "message)" in fqn_lower or "message," in fqn_lower:
+            return True
+
+        if sym.containing_type and self._containing_type_implements(sym.containing_type, "IRecipient"):
             return True
 
         if not sym.containing_type:
@@ -425,7 +571,12 @@ class DeadCodeDetector:
 
         siblings = self._symbols_by_containing_type.get(sym.containing_type, [])
         receive_methods = [member for member in siblings if member.kind == "method" and (member.name or "").lower() == "receive"]
-        return len(receive_methods) >= 2
+        return len(receive_methods) >= 2 and any(
+            ".messages." in (member.fqn or "").lower()
+            or "message)" in (member.fqn or "").lower()
+            or "message," in (member.fqn or "").lower()
+            for member in receive_methods
+        )
 
     @staticmethod
     def _looks_like_explicit_interface_method(sym: Symbol) -> bool:
@@ -453,46 +604,47 @@ class DeadCodeDetector:
 
     @staticmethod
     def _looks_like_host_integration_method(sym: Symbol, file_path: str) -> bool:
+        return DeadCodeDetector._get_aspnet_hosting_rule(sym, file_path) is not None
+
+    @staticmethod
+    def _looks_like_ui_event_signature(fqn_lower: str) -> bool:
+        if "(object," not in fqn_lower:
+            return False
+
+        return (
+            "eventargs)" in fqn_lower
+            or "eventargs," in fqn_lower
+            or "(object, system.windows.forms." in fqn_lower
+            or "(object, system.componentmodel." in fqn_lower
+        )
+
+    def _looks_like_command_method(self, sym: Symbol) -> bool:
         name = (sym.name or "").lower()
-        containing_type = (sym.containing_type or "").split(".")[-1].lower()
-        path_lower = file_path.lower()
+        if not name or not sym.containing_type:
+            return False
 
-        if name in {"main", "mainasync"}:
-            return True
+        if not (sym.containing_type.split(".")[-1].lower().endswith("viewmodel")):
+            return False
 
-        if name in {"invoke", "invokeasync"} and (
-            containing_type.endswith("middleware")
-            or "\\middleware\\" in path_lower
-        ):
-            return True
+        siblings = self._symbols_by_containing_type.get(sym.containing_type, [])
+        command_names = {
+            (member.name or "").lower()
+            for member in siblings
+            if member.kind in {"field", "property"}
+        }
+        return f"{name}command" in command_names or f"{name}_command" in command_names
 
-        if name.startswith("use") and containing_type.endswith(("extensions", "middleware")):
-            return True
+    def _containing_type_implements(self, containing_type: str, interface_name_fragment: str) -> bool:
+        graph = getattr(self.graph, "inheritance_graph", None)
+        if graph is None or containing_type not in graph:
+            return False
 
-        if name in {"configure", "configureservices"} and containing_type == "startup":
-            return True
+        fragment = interface_name_fragment.lower()
+        try:
+            return any(fragment in base_fqn.lower() for base_fqn in graph.successors(containing_type))
+        except Exception:
+            return False
 
-        if name in {"onactionexecuting", "onactionexecuted"} and (
-            containing_type.endswith("filter")
-            or "\\controllers\\" in path_lower
-            or "\\filters\\" in path_lower
-        ):
-            return True
-
-        if "\\controllers\\" in path_lower and containing_type.endswith("controller"):
-            if (sym.accessibility or "").lower() == "public":
-                return True
-
-        if name == "map" and (
-            containing_type.endswith(("endpoint", "endpoints", "extensions"))
-            or "\\webservercore\\endpoints\\" in path_lower
-        ):
-            return True
-
-        if name.startswith("create") and containing_type.endswith(("webserver", "host", "builder")):
-            return True
-
-        return False
     def _type_has_live_members(self, sym: Symbol) -> bool:
         members = self._symbols_by_containing_type.get(sym.fqn, [])
         for member in members:

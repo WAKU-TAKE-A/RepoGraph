@@ -82,7 +82,9 @@ namespace Probe
                     ? workspace.CurrentSolution.Projects.Where(p => p.FilePath?.EndsWith(".csproj") == true).ToList()
                     : workspace.CurrentSolution.Projects.ToList();
                 logger.LogInformation("Found {Count} projects", projects.Count);
-                var savedProjectIds = new HashSet<ProjectId>();
+                var includedProjects = projects
+                    .Where(p => !filterService.ShouldExcludeFile(p.FilePath ?? p.Name))
+                    .ToList();
                 var stableProjectIds = new Dictionary<ProjectId, string>();
                 var projectDependencies = new List<ProjectDependencyData>();
                 var allMethodCalls = new List<MethodCallData>();
@@ -91,20 +93,19 @@ namespace Probe
                 var allTypeDependencies = new List<TypeDependencyData>();
                 var methodIndex = new Dictionary<string, List<string>>(StringComparer.Ordinal);
 
-                foreach (var project in projects)
+                foreach (var project in includedProjects)
+                {
+                    var projectKey = Path.GetFullPath(project.FilePath ?? project.Name);
+                    stableProjectIds[project.Id] = GetStableId(projectKey);
+                }
+
+                foreach (var project in includedProjects)
                 {
                     try
                     {
-                        if (filterService.ShouldExcludeFile(project.FilePath ?? project.Name))
-                        {
-                            logger.LogInformation("Skipping excluded project: {Name}", project.Name);
-                            continue;
-                        }
-
                         logger.LogInformation("Analyzing project: {Name}", project.Name);
                         var projectKey = Path.GetFullPath(project.FilePath ?? project.Name);
-                        var projectId = GetStableId(projectKey);
-                        stableProjectIds[project.Id] = projectId;
+                        var projectId = stableProjectIds[project.Id];
                         var documentsToAnalyze = project.Documents
                             .Where(document => !filterService.ShouldExcludeFile(document.FilePath ?? document.Name))
                             .ToList();
@@ -150,7 +151,6 @@ namespace Probe
                         }
 
                         await persistence.ResetProjectAnalysisDataAsync(projectId);
-                        savedProjectIds.Add(project.Id);
                         var projectMetadata = LoadProjectMetadata(project.FilePath, project, documentsToAnalyze.Count);
                         await persistence.SaveProjectAsync(
                             projectId,
@@ -255,11 +255,11 @@ namespace Probe
                     }
                 }
 
-                foreach (var project in projects.Where(p => savedProjectIds.Contains(p.Id)))
+                foreach (var project in includedProjects)
                 {
                     foreach (var projectReference in project.ProjectReferences)
                     {
-                        if (!savedProjectIds.Contains(projectReference.ProjectId))
+                        if (!stableProjectIds.ContainsKey(projectReference.ProjectId))
                         {
                             continue;
                         }

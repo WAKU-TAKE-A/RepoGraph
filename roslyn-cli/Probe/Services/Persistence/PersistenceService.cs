@@ -35,6 +35,27 @@ namespace Probe.Services.Persistence
 
         private async Task EnsureSchemaAsync(SqliteConnection connection)
         {
+            await EnsureColumnsAsync(connection, "analysis_runs", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["total_projects"] = "ALTER TABLE analysis_runs ADD COLUMN total_projects INTEGER",
+                ["analyzed_projects"] = "ALTER TABLE analysis_runs ADD COLUMN analyzed_projects INTEGER",
+                ["failed_projects"] = "ALTER TABLE analysis_runs ADD COLUMN failed_projects INTEGER",
+                ["command_line"] = "ALTER TABLE analysis_runs ADD COLUMN command_line TEXT",
+                ["config_hash"] = "ALTER TABLE analysis_runs ADD COLUMN config_hash TEXT"
+            });
+
+            await EnsureColumnsAsync(connection, "projects", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["assembly_name"] = "ALTER TABLE projects ADD COLUMN assembly_name TEXT",
+                ["target_framework"] = "ALTER TABLE projects ADD COLUMN target_framework TEXT",
+                ["project_type"] = "ALTER TABLE projects ADD COLUMN project_type TEXT",
+                ["is_test_project"] = "ALTER TABLE projects ADD COLUMN is_test_project INTEGER NOT NULL DEFAULT 0",
+                ["is_sdk_style"] = "ALTER TABLE projects ADD COLUMN is_sdk_style INTEGER NOT NULL DEFAULT 0",
+                ["document_count"] = "ALTER TABLE projects ADD COLUMN document_count INTEGER",
+                ["analysis_status"] = "ALTER TABLE projects ADD COLUMN analysis_status TEXT",
+                ["error_message"] = "ALTER TABLE projects ADD COLUMN error_message TEXT"
+            });
+
             await EnsureColumnsAsync(connection, "symbols", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["has_ui_dispatch"] = "ALTER TABLE symbols ADD COLUMN has_ui_dispatch INTEGER NOT NULL DEFAULT 0",
@@ -109,23 +130,21 @@ DELETE FROM solutions;";
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = @"
-DELETE FROM project_dependencies WHERE source_project_id = @projectId;
+DELETE FROM project_dependencies
+WHERE source_project_id = @projectId
+   OR target_project_id = @projectId;
 
 DELETE FROM method_calls
-WHERE caller_id IN (SELECT id FROM symbols WHERE project_id = @projectId)
-   OR callee_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
+WHERE caller_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
 
 DELETE FROM inheritance
-WHERE derived_id IN (SELECT id FROM symbols WHERE project_id = @projectId)
-   OR base_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
+WHERE derived_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
 
 DELETE FROM symbol_relationships
-WHERE source_id IN (SELECT id FROM symbols WHERE project_id = @projectId)
-   OR target_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
+WHERE source_id IN (SELECT id FROM symbols WHERE project_id = @projectId);
 
 DELETE FROM field_accesses
-WHERE accessor_fqn IN (SELECT fqn FROM symbols WHERE project_id = @projectId)
-   OR target_fqn IN (SELECT fqn FROM symbols WHERE project_id = @projectId);
+WHERE accessor_fqn IN (SELECT fqn FROM symbols WHERE project_id = @projectId);
 
 DELETE FROM symbols WHERE project_id = @projectId;
 DELETE FROM documents WHERE project_id = @projectId;

@@ -5,6 +5,7 @@ You are analyzing a C# / .NET repository with RepoGraph.
 RepoGraph is designed to make large repositories easier for AI to navigate.
 Treat `hotspots`, structural graphs, and related-symbol search as primary evidence.
 Treat `deadcode` as a secondary, heuristic investigation aid that always requires follow-up verification.
+When `deadcode` suppresses framework-driven symbols, check the reported rule IDs to understand whether the suppression came from .NET hosting, XAML/UI, MVVM, ASP.NET, DI, or serialization conventions.
 
 ## 2. Environment
 Use these exact paths when running commands:
@@ -68,6 +69,7 @@ Important:
 - Use it to narrow search space and explain why something looks isolated.
 - Always confirm with graph evidence, text search, and surrounding code.
 - Prefer `dead_code_candidates.json` when another AI or script needs machine-readable reasons.
+- Read `Suppressed Convention Patterns` in the markdown report when you need to understand which framework conventions were intentionally filtered out.
 
 ## 4. Recommended Interpretation
 
@@ -94,12 +96,14 @@ Use this sequence:
 - shared mutable state detection
 - lambda / event / type dependency recovery
 - related-symbol search for similar existing code
+- convention suppression reporting with explicit rule IDs
 
 ### Weaker areas
 - reflection-heavy dispatch
-- framework conventions not yet modeled
+- framework conventions not yet fully modeled
 - some command / host / callback-driven execution paths
 - dead code precision in highly dynamic systems
+- incremental scans should still be sanity-checked against full scans on important investigations
 
 ## 6. Behavioral Guidance
 - Do not manually read the whole repository first.

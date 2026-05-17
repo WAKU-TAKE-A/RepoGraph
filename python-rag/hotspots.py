@@ -14,6 +14,24 @@ def _categorize_writer(fqn: str) -> str:
         return "event"
     return "runtime"
 
+def _anti_pattern_reasons(kind: str, fqn: str, loc: int, fan_in: int, danger_score: int) -> List[str]:
+    if kind != "class":
+        return []
+
+    reasons = []
+    name_lower = fqn.lower()
+    broad_responsibility_names = ("manager", "controller", "global", "registry", "serviceprovider", "locator")
+    has_broad_responsibility_name = any(keyword in name_lower for keyword in broad_responsibility_names)
+
+    if danger_score >= 2000:
+        reasons.append("high fan-in x LOC")
+    if loc >= 1500 and fan_in >= 5:
+        reasons.append("very large class with multiple callers")
+    if has_broad_responsibility_name and danger_score >= 500:
+        reasons.append("broad-responsibility name with notable fan-in x LOC")
+
+    return reasons
+
 class HotspotScorer:
     def __init__(self, session: Session, graph_loader: GraphLoader, output_dir: str):
         self.session = session
@@ -131,15 +149,14 @@ class HotspotScorer:
             
             danger_score = m["fan_in"] * m["loc"]
             
-            is_anti_pattern = False
-            if r["kind"] == "class":
-                name_lower = r["fqn"].lower()
-                has_smelly_name = any(kw in name_lower for kw in ["manager", "controller", "global", "station", "base", "editor"])
-                is_anti_pattern = (
-                    danger_score >= 2000 or
-                    (m["loc"] >= 1500 and m["fan_in"] >= 5) or
-                    (has_smelly_name and danger_score >= 500)
-                )
+            anti_pattern_reasons = _anti_pattern_reasons(
+                r["kind"],
+                r["fqn"],
+                m["loc"],
+                m["fan_in"],
+                danger_score,
+            )
+            is_anti_pattern = bool(anti_pattern_reasons)
 
             # Threading hazard detection
             is_threading_hazard = (
@@ -156,6 +173,7 @@ class HotspotScorer:
                 "score": round(score, 4),
                 "danger_score": danger_score,
                 "is_anti_pattern": is_anti_pattern,
+                "anti_pattern_reasons": anti_pattern_reasons,
                 "is_threading_hazard": is_threading_hazard,
                 "thread_flags": {
                     "has_ui_dispatch": r["has_ui_dispatch"],
@@ -337,12 +355,13 @@ class HotspotScorer:
                 f.write("## ⚠️ Anti-Pattern Warnings (God Class / Service Locator)\n\n")
                 f.write("> [!WARNING]\n")
                 f.write("> The following classes have unusually high 'Danger Scores' (Fan-In × LOC) and names suggesting they might be managing global state or acting as God Classes.\n\n")
-                f.write("| Rank | Danger Score | Symbol (FQN) | LOC | Fan-in |\n")
-                f.write("|------|--------------|--------------|-----|--------|\n")
+                f.write("| Rank | Danger Score | Reason | Symbol (FQN) | LOC | Fan-in |\n")
+                f.write("|------|--------------|--------|--------------|-----|--------|\n")
                 for i, h in enumerate(anti_patterns[:20]):
                     m = h["metrics"]
                     link = f"[`{h['fqn']}`]({h['file_name']}#L{h['line_start']})" if h['file_name'] else f"`{h['fqn']}`"
-                    f.write(f"| {i+1} | {h['danger_score']} | {link} | {m['loc']} | {m['fan_in']} |\n")
+                    reason = ", ".join(h.get("anti_pattern_reasons", []))
+                    f.write(f"| {i+1} | {h['danger_score']} | {reason} | {link} | {m['loc']} | {m['fan_in']} |\n")
                 f.write("\n---\n\n")
 
             # --- Threading Hazard Warnings ---

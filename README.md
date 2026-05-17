@@ -1,4 +1,4 @@
-# RepoGraph (v0.9.6.0)
+# RepoGraph (v0.9.7.0)
 
 RepoGraph は、生成 AI が巨大な C# / .NET リポジトリを扱いやすいように作った解析ツールチェーンです。
 コードを AI 向けの構造データへ変換し、AI や人間が「どこが中心か」「どこが危険か」「どこで状態が共有されているか」「既存の近い実装は何か」を掴みやすくすることを主目的にしています。
@@ -7,6 +7,7 @@ RepoGraph は、生成 AI が巨大な C# / .NET リポジトリを扱いやす�
 - `Probe` が Roslyn / MSBuild を使って `symbols`、`method_calls`、`field_accesses`、`type_dependency` などを抽出します。
 - `Relay` がその出力を使って `hotspots.md`、`dead_code_candidates.md`、`dead_code_candidates.json`、RAG 用 index を生成します。
 - 現時点で比較的強いのは `hotspots`、`thread hazard`、`shared mutable state`、`call/type/field graph` です。
+- `deadcode` では、除外された候補についても `Suppressed Convention Patterns` として rule ID 単位で由来を見える化します。
 
 ## 何がまだ弱いか
 - `deadcode` は heuristic ベースで、補助的な候補列挙です。
@@ -55,6 +56,8 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py re
 - AI にこのリポジトリを触らせるときは、最初に [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を読ませてください。
 - `deadcode` は便利ですが主役ではありません。まずは `hotspots` と graph の精度を優先して使う想定です。
 - `deadcode` は候補を無理に減らすより、「なぜ孤立して見えるか」を説明し、追加調査をしやすくする方向で使います。
+- フレームワーク由来の除外は、`.NET host`、`XAML/UI`、`MVVM`、`ASP.NET`、`DI`、`serialization` などの rule ID に分けて管理しています。
+- `incremental` は使えますが、まずは `full` を基準に信頼し、差分運用では重要箇所を再確認する前提が安全です。
 
 ## License
 [MIT License](LICENSE)
