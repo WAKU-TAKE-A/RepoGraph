@@ -4,12 +4,14 @@ from sqlalchemy.orm import Session
 from models import Project, Symbol
 from graph import GraphLoader
 from loguru import logger
+from related import RelatedFinder
 
 class DeadCodeDetector:
     def __init__(self, session: Session, graph_loader: GraphLoader, reports_dir: str):
         self.session = session
         self.graph = graph_loader
         self.reports_dir = reports_dir
+        self.related_finder = RelatedFinder(session, graph_loader)
         os.makedirs(self.reports_dir, exist_ok=True)
         self._test_project_ids = {
             project_id
@@ -27,7 +29,7 @@ class DeadCodeDetector:
             file_path = sym.document.file_path if sym.document else ""
             file_name = sym.document.file_name if sym.document else ""
 
-            if sym.kind in {"xaml", "lambda"}:
+            if sym.kind in {"xaml", "lambda", "framework_method"}:
                 continue
 
             # 0. テスト資産は entrypoint / assertion / attribute / runner 規約が強く、静的参照だけで死活判定しにくい
@@ -39,6 +41,9 @@ class DeadCodeDetector:
                 continue
 
             if self._looks_like_discovered_endpoint(sym, file_path):
+                continue
+
+            if self._looks_like_reflection_discovered_implementation(sym, file_path):
                 continue
 
             # 0. グラフ側で入辺が見えている場合は、DB の fan_in が古い/粗い可能性があるため除外
@@ -116,7 +121,9 @@ class DeadCodeDetector:
                 "fqn": sym.fqn,
                 "kind": sym.kind,
                 "loc": sym.loc if sym.loc else 0,
-                "file": file_name
+                "file": file_name,
+                "related": [],
+                "category": "isolated",
             })
             
         # LOC（コード行数）が大きい＝削除時のリターンが大きい順にソート
@@ -125,18 +132,107 @@ class DeadCodeDetector:
 
     def generate_report(self):
         candidates = self.detect_dead_code_candidates()
+        self._attach_related_candidates(candidates)
+        self._categorize_candidates(candidates)
+        candidates = self._prioritize_candidates(candidates)
         report_path = os.path.join(self.reports_dir, "dead_code_candidates.md")
         
         with open(report_path, "w", encoding="utf-8") as f:
             f.write("# Dead Code Candidates\n\n")
             f.write("> **⚠️ Warning**: These are heuristic candidates based on structural graph analysis (Fan-in = 0, No Derived Classes, No Type Usages).\n")
             f.write("> **Always verify with AI text search (grep) or IDE references before deletion.**\n\n")
-            f.write("| Rank | LOC | Kind | Symbol (FQN) | File |\n")
-            f.write("|------|-----|------|--------------|------|\n")
+            category_counts = self._summarize_categories(candidates)
+            f.write("## Investigation Categories\n\n")
+            f.write(f"- `isolated`: {category_counts['isolated']} candidates with weak or no nearby matches\n")
+            f.write(f"- `structural-sibling`: {category_counts['structural-sibling']} candidates with some structural similarity nearby\n")
+            f.write(f"- `near-family`: {category_counts['near-family']} candidates that strongly resemble existing family members or variants\n\n")
+            f.write("| Rank | Category | Related | LOC | Kind | Symbol (FQN) | File |\n")
+            f.write("|------|----------|---------|-----|------|--------------|------|\n")
             for i, c in enumerate(candidates, 1):
-                f.write(f"| {i} | {c['loc']} | {c['kind']} | `{c['fqn']}` | {c['file']} |\n")
+                f.write(
+                    f"| {i} | `{c['category']}` | {len(c['related'])} | {c['loc']} | {c['kind']} | `{c['fqn']}` | {c['file']} |\n"
+                )
+
+            annotated_candidates = [candidate for candidate in candidates[:20] if candidate["related"]]
+            if annotated_candidates:
+                f.write("\n## Related Existing Implementations\n\n")
+                f.write("> [!TIP]\n")
+                f.write("> These candidates have nearby existing symbols with similar naming or structural context.\n")
+                f.write("> Use this section to check whether the candidate is actually a duplicate family member, a callback slot, or a refactoring target rather than dead code.\n\n")
+                for candidate in annotated_candidates:
+                    f.write(f"<details><summary>`{candidate['fqn']}`</summary>\n\n")
+                    for related in candidate["related"]:
+                        f.write(f"- `{related['fqn']}` ({related['kind']}, score {related['score']:.4f})\n")
+                        reason_text = ", ".join(related["reasons"][:4])
+                        if reason_text:
+                            f.write(f"  reasons: {reason_text}\n")
+                    f.write("\n</details>\n\n")
                 
         logger.info(f"Generated dead code report with {len(candidates)} candidates at {report_path}")
+
+    def _attach_related_candidates(self, candidates: List[Dict]) -> None:
+        for candidate in candidates[:50]:
+            symbol = self.related_finder.find_symbol(candidate["fqn"])
+            if symbol is None:
+                continue
+            related = self.related_finder.find_related(symbol, top_k=3)
+            candidate["related"] = [item.to_dict() for item in related if item.score >= 0.45]
+
+    @staticmethod
+    def _categorize_candidates(candidates: List[Dict]) -> None:
+        for candidate in candidates:
+            candidate["category"] = DeadCodeDetector._classify_candidate(candidate)
+
+    @staticmethod
+    def _classify_candidate(candidate: Dict) -> str:
+        if not candidate["related"]:
+            return "isolated"
+
+        strongest = candidate["related"][0]
+        reasons = strongest.get("reasons", [])
+        score = strongest.get("score", 0.0)
+        has_locality = any(reason in {"same containing type", "same namespace"} for reason in reasons)
+        has_name_family = any(reason.startswith("name tokens ") for reason in reasons)
+        has_structural_overlap = any(
+            reason.startswith(prefix)
+            for reason in reasons
+            for prefix in ("shared callers", "shared callees", "shared used types", "shared used fields")
+        )
+
+        if score >= 0.7 and has_locality and has_name_family:
+            return "near-family"
+
+        if score >= 0.55 and (has_structural_overlap or has_locality):
+            return "structural-sibling"
+
+        return "isolated"
+
+    @staticmethod
+    def _prioritize_candidates(candidates: List[Dict]) -> List[Dict]:
+        category_order = {
+            "isolated": 0,
+            "structural-sibling": 1,
+            "near-family": 2,
+        }
+        return sorted(
+            candidates,
+            key=lambda candidate: (
+                category_order.get(candidate["category"], 99),
+                -candidate["loc"],
+                candidate["fqn"],
+            ),
+        )
+
+    @staticmethod
+    def _summarize_categories(candidates: List[Dict]) -> Dict[str, int]:
+        counts = {
+            "isolated": 0,
+            "structural-sibling": 0,
+            "near-family": 0,
+        }
+        for candidate in candidates:
+            counts[candidate["category"]] = counts.get(candidate["category"], 0) + 1
+        return counts
 
     @staticmethod
     def _looks_like_ui_type(sym: Symbol) -> bool:
@@ -174,9 +270,17 @@ class DeadCodeDetector:
     def _looks_like_framework_convention_method(sym: Symbol) -> bool:
         name = (sym.name or "").lower()
         containing_type = (sym.containing_type or "").split(".")[-1].lower()
+        file_path = sym.document.file_path.lower() if sym.document and sym.document.file_path else ""
+        callback_names = {
+            "render", "drawitem", "ondrawitem", "onrender", "onupdate",
+            "onpointerpressed", "onpointermoved", "onpointerreleased",
+            "onkeydown", "onkeyup", "ontextinput", "onloaded",
+            "onselectionchanged", "onviewmodelpropertychanged",
+        }
 
         if name in {
             "onstartup", "oninitialize", "onactivated", "onapplytemplate",
+            "onframeworkinitializationcompleted",
             "convert", "convertback", "load"
         }:
             return True
@@ -185,6 +289,17 @@ class DeadCodeDetector:
             return True
 
         if name == "save" and containing_type.endswith("viewmodel"):
+            return True
+
+        if (file_path.endswith(".axaml.cs") or file_path.endswith(".xaml.cs")) and name.startswith("on"):
+            return True
+
+        if name in callback_names:
+            return True
+
+        if name in {"render", "drawitem", "onupdate"} and containing_type.endswith((
+            "renderer", "shape", "annotation", "control", "tool"
+        )):
             return True
 
         return False
@@ -271,6 +386,46 @@ class DeadCodeDetector:
 
         if name.startswith("create") and containing_type.endswith(("webserver", "host", "builder")):
             return True
+
+        return False
+
+    def _looks_like_reflection_discovered_implementation(self, sym: Symbol, file_path: str) -> bool:
+        if sym.kind != "class":
+            return False
+
+        fqn = sym.fqn
+        short_name = (sym.name or "").split(".")[-1]
+        file_lower = file_path.lower()
+
+        reflection_base_suffixes = (
+            "imageeffectbase",
+            "imageuploader",
+            "fileuploader",
+            "textuploader",
+        )
+        reflection_path_markers = (
+            "\\imageeffects\\",
+            "\\imageuploaders\\",
+            "\\fileuploaders\\",
+            "\\textuploaders\\",
+        )
+        reflection_name_suffixes = (
+            "imageeffect",
+            "uploader",
+        )
+
+        if hasattr(self.graph, "inheritance_graph") and fqn in self.graph.inheritance_graph:
+            try:
+                for base_fqn in self.graph.inheritance_graph.successors(fqn):
+                    base_short_name = base_fqn.split(".")[-1].lower()
+                    if any(base_short_name.endswith(suffix) for suffix in reflection_base_suffixes):
+                        return True
+            except Exception:
+                pass
+
+        if any(marker in file_lower for marker in reflection_path_markers):
+            if any(short_name.lower().endswith(suffix) for suffix in reflection_name_suffixes):
+                return True
 
         return False
 

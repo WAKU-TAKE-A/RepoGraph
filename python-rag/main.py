@@ -1,6 +1,7 @@
 import typer
 import yaml
 import os
+import json
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from loguru import logger
@@ -8,6 +9,7 @@ from models import Base, Symbol
 from graph import GraphLoader
 from hotspots import HotspotScorer
 from deadcode import DeadCodeDetector
+from related import RelatedFinder
 import networkx as nx
 import json
 
@@ -158,6 +160,61 @@ def deadcode(workspace: str = typer.Option(None, "--workspace", "-w", help="Over
 
     detector = DeadCodeDetector(session, graph_loader, reports_dir)
     detector.generate_report()
+
+@app.command()
+def related(
+    symbol: str = typer.Argument(..., help="FQN or symbol name to find related code for"),
+    workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory"),
+    top_k: int = typer.Option(10, "--top-k", "-n", help="Maximum number of related symbols"),
+    same_kind_only: bool = typer.Option(True, "--same-kind/--all-kinds", help="Prefer symbols of the same kind"),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+):
+    """Find structurally and lexically related symbols for a known method/class."""
+    config = load_config()
+    db_path = os.path.join(workspace, "output", "repository.db") if workspace else config.get("database", {}).get("path", "")
+    graphs_dir = os.path.join(workspace, "output", "graphs") if workspace else config.get("graphs", {}).get("directory", "")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    graph_loader = GraphLoader(graphs_dir)
+    graph_loader.load_all()
+
+    finder = RelatedFinder(session, graph_loader)
+    source_symbol = finder.find_symbol(symbol)
+    if source_symbol is None:
+        logger.warning("Symbol not found: {}", symbol)
+        suggestions = finder.suggest_matches(symbol)
+        if suggestions:
+            print("Closest matches:")
+            for suggestion in suggestions:
+                print(f"  - {suggestion}")
+        return
+
+    print(f"Source: {source_symbol.fqn} ({source_symbol.kind})")
+    results = finder.find_related(source_symbol, top_k=top_k, same_kind_only=same_kind_only)
+    if not results:
+        logger.warning("No related symbols found.")
+        return
+
+    if json_output:
+        payload = {
+            "source": {
+                "fqn": source_symbol.fqn,
+                "kind": source_symbol.kind,
+            },
+            "results": [result.to_dict() for result in results],
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    for index, result in enumerate(results, start=1):
+        print(f"\n--- Related {index} (score: {result.score:.4f}) ---")
+        print(f"FQN: {result.fqn} (Kind: {result.kind})")
+        print("Reasons:")
+        for reason in result.reasons[:6]:
+            print(f"  - {reason}")
 
 if __name__ == "__main__":
     app()

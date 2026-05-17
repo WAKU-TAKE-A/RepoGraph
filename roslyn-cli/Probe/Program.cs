@@ -340,8 +340,10 @@ namespace Probe
                 return new List<string>();
             }
 
-            return Directory.EnumerateFiles(projectDir, "*.xaml", SearchOption.AllDirectories)
+            return Directory.EnumerateFiles(projectDir, "*.*", SearchOption.AllDirectories)
                 .Where(path =>
+                    (path.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase) ||
+                     path.EndsWith(".axaml", StringComparison.OrdinalIgnoreCase)) &&
                     !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) &&
                     !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) &&
                     !filterService.ShouldExcludeFile(path))

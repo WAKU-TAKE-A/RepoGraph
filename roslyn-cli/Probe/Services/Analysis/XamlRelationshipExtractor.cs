@@ -13,6 +13,8 @@ namespace Probe.Services.Analysis
     public class XamlRelationshipExtractor
     {
         private static readonly Regex HandlerNamePattern = new("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
+        private static readonly Regex StaticReferencePattern = new(@"^\{x:Static\s+(?<ref>[A-Za-z_][A-Za-z0-9_]*:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\}$", RegexOptions.Compiled);
+        private static readonly Regex TypeReferencePattern = new(@"^\{x:Type\s+(?<ref>[A-Za-z_][A-Za-z0-9_]*:[A-Za-z_][A-Za-z0-9_]*)\}$", RegexOptions.Compiled);
         private static readonly HashSet<string> KnownEventAttributes = new(StringComparer.OrdinalIgnoreCase)
         {
             "Startup", "Exit", "DispatcherUnhandledException", "Loaded", "Unloaded",
@@ -88,7 +90,9 @@ namespace Probe.Services.Analysis
                     });
 
                     var clrNamespaceMappings = root.Attributes()
-                        .Where(a => a.IsNamespaceDeclaration && a.Value.StartsWith("clr-namespace:", StringComparison.Ordinal))
+                        .Where(a => a.IsNamespaceDeclaration && (
+                            a.Value.StartsWith("clr-namespace:", StringComparison.Ordinal) ||
+                            a.Value.StartsWith("using:", StringComparison.Ordinal)))
                         .Select(a => new
                         {
                             Prefix = a.Name.LocalName == "xmlns" ? string.Empty : a.Name.LocalName,
@@ -140,6 +144,16 @@ namespace Probe.Services.Analysis
                                         });
                                     }
                                 }
+                            }
+
+                            if (TryResolveAttributeTypeReference(attrName, attrValue, clrNamespaceMappings, out var attributeTypeFqn))
+                            {
+                                result.TypeDependencies.Add(new TypeDependencyData
+                                {
+                                    SourceFqn = symbolFqn,
+                                    TargetFqn = attributeTypeFqn,
+                                    Kind = "xaml_type_usage"
+                                });
                             }
 
                             if (attrName.Equals("StartupUri", StringComparison.OrdinalIgnoreCase))
@@ -255,6 +269,94 @@ namespace Probe.Services.Analysis
             return HandlerNamePattern.IsMatch(value);
         }
 
+        private static bool TryResolveAttributeTypeReference(
+            string attributeName,
+            string attributeValue,
+            IReadOnlyDictionary<string, ClrNamespaceMapping> mappings,
+            out string typeFqn)
+        {
+            typeFqn = string.Empty;
+
+            if (TryResolveStaticReference(attributeValue, mappings, out typeFqn))
+            {
+                return true;
+            }
+
+            if (TryResolveTypeReference(attributeValue, mappings, out typeFqn))
+            {
+                return true;
+            }
+
+            if (attributeName.EndsWith("DataType", StringComparison.OrdinalIgnoreCase) &&
+                TryResolvePrefixedTypeReference(attributeValue, mappings, out typeFqn))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryResolveStaticReference(
+            string value,
+            IReadOnlyDictionary<string, ClrNamespaceMapping> mappings,
+            out string typeFqn)
+        {
+            typeFqn = string.Empty;
+            var match = StaticReferencePattern.Match(value);
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            var rawReference = match.Groups["ref"].Value;
+            var memberSeparator = rawReference.LastIndexOf('.');
+            var typeReference = memberSeparator > 0 ? rawReference[..memberSeparator] : rawReference;
+            return TryResolvePrefixedTypeReference(typeReference, mappings, out typeFqn);
+        }
+
+        private static bool TryResolveTypeReference(
+            string value,
+            IReadOnlyDictionary<string, ClrNamespaceMapping> mappings,
+            out string typeFqn)
+        {
+            typeFqn = string.Empty;
+            var match = TypeReferencePattern.Match(value);
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            return TryResolvePrefixedTypeReference(match.Groups["ref"].Value, mappings, out typeFqn);
+        }
+
+        private static bool TryResolvePrefixedTypeReference(
+            string value,
+            IReadOnlyDictionary<string, ClrNamespaceMapping> mappings,
+            out string typeFqn)
+        {
+            typeFqn = string.Empty;
+            var separatorIndex = value.IndexOf(':');
+            if (separatorIndex <= 0 || separatorIndex >= value.Length - 1)
+            {
+                return false;
+            }
+
+            var prefix = value[..separatorIndex];
+            var localName = value[(separatorIndex + 1)..];
+            if (string.IsNullOrWhiteSpace(localName) || localName.Contains('.'))
+            {
+                return false;
+            }
+
+            if (!mappings.TryGetValue(prefix, out var mapping) || string.IsNullOrWhiteSpace(mapping.Namespace))
+            {
+                return false;
+            }
+
+            typeFqn = $"{mapping.Namespace}.{localName}";
+            return true;
+        }
+
         private static bool TryResolveElementType(XElement element, IReadOnlyDictionary<string, ClrNamespaceMapping> mappings, out string typeFqn)
         {
             typeFqn = string.Empty;
@@ -327,6 +429,10 @@ namespace Probe.Services.Analysis
                 if (part.StartsWith("clr-namespace:", StringComparison.Ordinal))
                 {
                     mapping.Namespace = part["clr-namespace:".Length..];
+                }
+                else if (part.StartsWith("using:", StringComparison.Ordinal))
+                {
+                    mapping.Namespace = part["using:".Length..];
                 }
                 else if (part.StartsWith("assembly=", StringComparison.Ordinal))
                 {

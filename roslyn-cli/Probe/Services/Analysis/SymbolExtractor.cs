@@ -150,6 +150,8 @@ namespace Probe.Services.Analysis
                 {
                     RecordTypeDependency(param.Type, symbolData.Fqn, result);
                 }
+
+                ExtractOverrideDispatch(compilationCache, method, symbolData, result);
             }
 
             if (symbol is IMethodSymbol && IsExecutableNode(declarationNode))
@@ -257,6 +259,62 @@ namespace Probe.Services.Analysis
                 || node is ConstructorDeclarationSyntax
                 || node is AccessorDeclarationSyntax
                 || node is LocalFunctionStatementSyntax;
+        }
+
+        private static void ExtractOverrideDispatch(
+            CompilationAnalysisCache compilationCache,
+            IMethodSymbol method,
+            SymbolData symbolData,
+            ExtractionResult result)
+        {
+            if (method.OverriddenMethod == null)
+            {
+                return;
+            }
+
+            var baseFqn = method.OverriddenMethod.OriginalDefinition.ToDisplayString();
+            if (!compilationCache.KnowsMethod(baseFqn))
+            {
+                result.Symbols.Add(CreateFrameworkMethodSymbol(method.OverriddenMethod));
+            }
+
+            result.MethodCalls.Add(new MethodCallData
+            {
+                CallerId = baseFqn,
+                CalleeId = symbolData.Fqn,
+                CallCount = 1,
+                CallType = "override_dispatch"
+            });
+        }
+
+        private static SymbolData CreateFrameworkMethodSymbol(IMethodSymbol method)
+        {
+            var fqn = method.OriginalDefinition.ToDisplayString();
+            return new SymbolData
+            {
+                Id = GetStableHash(fqn),
+                Fqn = fqn,
+                Name = method.Name,
+                Kind = "framework_method",
+                Namespace = method.ContainingNamespace?.ToDisplayString(),
+                ContainingType = method.ContainingType?.ToDisplayString(),
+                Accessibility = method.DeclaredAccessibility.ToString().ToLower(),
+                IsStatic = method.IsStatic,
+                IsAbstract = method.IsAbstract,
+                IsSealed = method.IsSealed,
+                IsAsync = method.IsAsync || method.ReturnType.ToDisplayString().StartsWith("System.Threading.Tasks.Task"),
+                IsPartial = false,
+                IsGeneric = method.IsGenericMethod,
+                IsExtensionMethod = method.IsExtensionMethod,
+                IsDisposable = false,
+                IsVolatile = false,
+                LineStart = 0,
+                LineEnd = 0,
+                Loc = 0,
+                ParameterCount = method.Parameters.Length,
+                ReturnType = method.ReturnType.ToDisplayString(),
+                HasCallback = method.Parameters.Any(p => p.Type.TypeKind == TypeKind.Delegate || p.Type.Name.StartsWith("Action") || p.Type.Name.StartsWith("Func"))
+            };
         }
 
         /// <summary>
@@ -1060,6 +1118,7 @@ namespace Probe.Services.Analysis
     {
         private readonly Dictionary<string, HashSet<string>> _overrideMap;
         private readonly Dictionary<string, List<MethodLookupEntry>> _methodLookup;
+        private readonly HashSet<string> _knownMethods;
         private readonly HashSet<string> _autofacModuleTypes;
         private readonly HashSet<string> _autofacModuleLoadMethods;
 
@@ -1071,6 +1130,10 @@ namespace Probe.Services.Analysis
         {
             _overrideMap = overrideMap;
             _methodLookup = methodLookup;
+            _knownMethods = methodLookup.Values
+                .SelectMany(methods => methods)
+                .Select(method => method.Fqn)
+                .ToHashSet(StringComparer.Ordinal);
             _autofacModuleTypes = autofacModuleTypes;
             _autofacModuleLoadMethods = autofacModuleLoadMethods;
         }
@@ -1102,6 +1165,11 @@ namespace Probe.Services.Analysis
             }
 
             return methods.Select(m => m.Fqn).Distinct(StringComparer.Ordinal).ToList();
+        }
+
+        public bool KnowsMethod(string fqn)
+        {
+            return _knownMethods.Contains(fqn);
         }
 
         public IEnumerable<string> GetAutofacModuleTypes()
