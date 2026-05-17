@@ -15,6 +15,9 @@ namespace Probe.Services.Analysis
         private static readonly Regex HandlerNamePattern = new("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
         private static readonly Regex StaticReferencePattern = new(@"^\{x:Static\s+(?<ref>[A-Za-z_][A-Za-z0-9_]*:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\}$", RegexOptions.Compiled);
         private static readonly Regex TypeReferencePattern = new(@"^\{x:Type\s+(?<ref>[A-Za-z_][A-Za-z0-9_]*:[A-Za-z_][A-Za-z0-9_]*)\}$", RegexOptions.Compiled);
+        private static readonly Regex XBindPattern = new(@"^\{x:Bind\s+(?<path>[^,}]+)", RegexOptions.Compiled);
+        private static readonly Regex BindingPathPattern = new(@"^\{Binding\s+(?<path>[^,}]+)", RegexOptions.Compiled);
+        private static readonly Regex BindingNamedPathPattern = new(@"Path\s*=\s*(?<path>[^,}]+)", RegexOptions.Compiled);
         private static readonly HashSet<string> KnownEventAttributes = new(StringComparer.OrdinalIgnoreCase)
         {
             "Startup", "Exit", "DispatcherUnhandledException", "Loaded", "Unloaded",
@@ -41,7 +44,8 @@ namespace Probe.Services.Analysis
             string projectId,
             string projectPath,
             IEnumerable<string> xamlPaths,
-            IReadOnlyDictionary<string, List<string>> methodsByTypeAndName)
+            IReadOnlyDictionary<string, List<string>> methodsByTypeAndName,
+            IReadOnlyDictionary<string, List<SymbolData>> membersByTypeAndName)
         {
             var result = new XamlExtractionResult();
             var fullProjectPath = Path.GetFullPath(projectPath);
@@ -143,6 +147,37 @@ namespace Probe.Services.Analysis
                                             CallType = "xaml_event"
                                         });
                                     }
+                                }
+                            }
+
+                            if (LooksLikeActionMethodAttribute(attrName) && LooksLikeHandlerName(attrValue))
+                            {
+                                if (methodsByTypeAndName.TryGetValue(BuildMethodIndexKey(xClass, attrValue), out var actionHandlers))
+                                {
+                                    foreach (var handlerFqn in actionHandlers)
+                                    {
+                                        result.MethodCalls.Add(new MethodCallData
+                                        {
+                                            CallerId = symbolFqn,
+                                            CalleeId = handlerFqn,
+                                            CallCount = 1,
+                                            CallType = "xaml_action_binding"
+                                        });
+                                    }
+                                }
+                            }
+
+                            if (attrName.EndsWith("Command", StringComparison.OrdinalIgnoreCase) &&
+                                TryResolveBoundSymbolFqns(element, attrValue, xClass, clrNamespaceMappings, membersByTypeAndName, out var boundCommandSymbols))
+                            {
+                                foreach (var commandSymbol in boundCommandSymbols)
+                                {
+                                    result.TypeDependencies.Add(new TypeDependencyData
+                                    {
+                                        SourceFqn = symbolFqn,
+                                        TargetFqn = commandSymbol,
+                                        Kind = "xaml_command_binding"
+                                    });
                                 }
                             }
 
@@ -264,9 +299,161 @@ namespace Probe.Services.Analysis
                 || name.EndsWith("KeyUp", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool LooksLikeActionMethodAttribute(string name)
+        {
+            return name.Equals("MethodName", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Action", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Execute", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool LooksLikeHandlerName(string value)
         {
             return HandlerNamePattern.IsMatch(value);
+        }
+
+        private static bool TryResolveBoundSymbolFqns(
+            XElement element,
+            string attributeValue,
+            string xClass,
+            IReadOnlyDictionary<string, ClrNamespaceMapping> mappings,
+            IReadOnlyDictionary<string, List<SymbolData>> membersByTypeAndName,
+            out IReadOnlyCollection<string> symbolFqns)
+        {
+            symbolFqns = Array.Empty<string>();
+            if (!TryExtractBindingPath(attributeValue, out var bindingPath))
+            {
+                return false;
+            }
+
+            var contextType = ResolveBindingContextType(element, xClass, mappings);
+            if (string.IsNullOrWhiteSpace(contextType))
+            {
+                return false;
+            }
+
+            var resolved = ResolveBindingPathSymbols(contextType, bindingPath, membersByTypeAndName)
+                .Select(symbol => symbol.Fqn)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (resolved.Count == 0)
+            {
+                return false;
+            }
+
+            symbolFqns = resolved;
+            return true;
+        }
+
+        private static bool TryExtractBindingPath(string attributeValue, out string bindingPath)
+        {
+            bindingPath = string.Empty;
+            if (string.IsNullOrWhiteSpace(attributeValue))
+            {
+                return false;
+            }
+
+            var xBindMatch = XBindPattern.Match(attributeValue);
+            if (xBindMatch.Success)
+            {
+                bindingPath = xBindMatch.Groups["path"].Value.Trim();
+                return !string.IsNullOrWhiteSpace(bindingPath);
+            }
+
+            var bindingMatch = BindingPathPattern.Match(attributeValue);
+            if (bindingMatch.Success)
+            {
+                bindingPath = bindingMatch.Groups["path"].Value.Trim();
+                if (bindingPath.StartsWith("Path=", StringComparison.OrdinalIgnoreCase))
+                {
+                    bindingPath = bindingPath["Path=".Length..].Trim();
+                }
+
+                return !string.IsNullOrWhiteSpace(bindingPath);
+            }
+
+            var namedPathMatch = BindingNamedPathPattern.Match(attributeValue);
+            if (namedPathMatch.Success)
+            {
+                bindingPath = namedPathMatch.Groups["path"].Value.Trim();
+                return !string.IsNullOrWhiteSpace(bindingPath);
+            }
+
+            return false;
+        }
+
+        private static string ResolveBindingContextType(XElement element, string xClass, IReadOnlyDictionary<string, ClrNamespaceMapping> mappings)
+        {
+            foreach (var current in element.AncestorsAndSelf())
+            {
+                var dataTypeAttribute = current.Attributes()
+                    .FirstOrDefault(attribute =>
+                        attribute.Name.LocalName == "DataType" &&
+                        attribute.Name.NamespaceName == "http://schemas.microsoft.com/winfx/2006/xaml");
+                if (dataTypeAttribute != null &&
+                    TryResolvePrefixedTypeReference(dataTypeAttribute.Value, mappings, out var dataType))
+                {
+                    return dataType;
+                }
+            }
+
+            return xClass;
+        }
+
+        private static IEnumerable<SymbolData> ResolveBindingPathSymbols(
+            string rootType,
+            string bindingPath,
+            IReadOnlyDictionary<string, List<SymbolData>> membersByTypeAndName)
+        {
+            var segments = bindingPath
+                .Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (segments.Length == 0)
+            {
+                yield break;
+            }
+
+            foreach (var symbol in ResolveBindingPathSymbolsRecursive(rootType, segments, 0, membersByTypeAndName, new HashSet<string>(StringComparer.Ordinal)))
+            {
+                yield return symbol;
+            }
+        }
+
+        private static IEnumerable<SymbolData> ResolveBindingPathSymbolsRecursive(
+            string currentType,
+            string[] segments,
+            int index,
+            IReadOnlyDictionary<string, List<SymbolData>> membersByTypeAndName,
+            HashSet<string> visited)
+        {
+            var key = $"{currentType}|{segments[index]}";
+            if (!visited.Add($"{key}|{index}"))
+            {
+                yield break;
+            }
+
+            if (!membersByTypeAndName.TryGetValue(key, out var members))
+            {
+                yield break;
+            }
+
+            foreach (var member in members)
+            {
+                if (index == segments.Length - 1)
+                {
+                    yield return member;
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(member.ReturnType))
+                {
+                    continue;
+                }
+
+                foreach (var nested in ResolveBindingPathSymbolsRecursive(member.ReturnType!, segments, index + 1, membersByTypeAndName, visited))
+                {
+                    yield return nested;
+                }
+            }
         }
 
         private static bool TryResolveAttributeTypeReference(

@@ -7,11 +7,12 @@ RepoGraph は、生成 AI が巨大な C# / .NET リポジトリを扱いやす�
 - `Probe` が Roslyn / MSBuild を使って `symbols`、`method_calls`、`field_accesses`、`type_dependency` などを抽出します。
 - `Relay` がその出力を使って `hotspots.md`、`dead_code_candidates.md`、`dead_code_candidates.json`、RAG 用 index を生成します。
 - 現時点で比較的強いのは `hotspots`、`thread hazard`、`shared mutable state`、`call/type/field graph` です。
-- `deadcode` では、除外された候補についても `Suppressed Convention Patterns` として rule ID 単位で由来を見える化します。
+- `hotspots` では raw の `fan-in/fan-out` に加えて、framework 由来の synthetic edge を少し割り引いた `effective fan-in/fan-out` も出します。
+- `deadcode` では、除外された候補について `Suppressed Convention Patterns` を rule ID と family 単位で見える化します。
 
 ## 何がまだ弱いか
 - `deadcode` は heuristic ベースで、補助的な候補列挙です。
-- `related` は近い既存メソッド / クラスを探す補助機能で、探索や横断修正には有効ですが万能ではありません。
+- `related` は近い既存メソッド / クラスを探す補助機能で、project / file family / 構造の近さを見るには有効ですが万能ではありません。
 - `reflection`、`DI`、`framework convention`、一部の `dispatch` はまだ完全ではありません。
 - そのため、`deadcode` の結果は削除判断に直結させず、AI や人間の二次確認を前提にしてください。
 
@@ -57,6 +58,7 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py re
 - `deadcode` は便利ですが主役ではありません。まずは `hotspots` と graph の精度を優先して使う想定です。
 - `deadcode` は候補を無理に減らすより、「なぜ孤立して見えるか」を説明し、追加調査をしやすくする方向で使います。
 - フレームワーク由来の除外は、`.NET host`、`XAML/UI`、`MVVM`、`ASP.NET`、`DI`、`serialization` などの rule ID に分けて管理しています。
+- graph JSON の `graph.scan_mode` と `graph.solution_path` で、`full` / `incremental` のどちらで作られた成果物かを確認できます。
 - `incremental` は使えますが、まずは `full` を基準に信頼し、差分運用では重要箇所を再確認する前提が安全です。
 
 ## License

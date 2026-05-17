@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Operations;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
@@ -16,10 +17,24 @@ namespace Probe.Services.Analysis
     {
         private readonly ILogger<SymbolExtractor> _logger;
         private readonly ConditionalWeakTable<Compilation, CompilationAnalysisCache> _compilationCache = new();
+        private Dictionary<string, HashSet<string>> _solutionServiceRegistrations = new(StringComparer.Ordinal);
 
         public SymbolExtractor(ILogger<SymbolExtractor> logger)
         {
             _logger = logger;
+        }
+
+        public void SetSolutionServiceRegistrations(Dictionary<string, HashSet<string>> registrations)
+        {
+            _solutionServiceRegistrations = CloneRegistrationMap(registrations);
+            _compilationCache.Clear();
+        }
+
+        public Dictionary<string, HashSet<string>> CollectServiceRegistrations(Compilation compilation)
+        {
+            var registrations = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            CollectServiceRegistrations(compilation, registrations);
+            return registrations;
         }
 
         public ExtractionResult Extract(Compilation compilation, SyntaxTree tree)
@@ -79,6 +94,18 @@ namespace Probe.Services.Analysis
                 if (symbol != null)
                 {
                     ProcessSymbol(compilationCache, semanticModel, node, symbol, result);
+
+                    if (symbol is INamedTypeSymbol namedTypeSymbol)
+                    {
+                        if (node is ClassDeclarationSyntax classDeclaration && classDeclaration.ParameterList != null)
+                        {
+                            ProcessPrimaryConstructorSymbol(namedTypeSymbol, classDeclaration, result);
+                        }
+                        else if (node is StructDeclarationSyntax structDeclaration && structDeclaration.ParameterList != null)
+                        {
+                            ProcessPrimaryConstructorSymbol(namedTypeSymbol, structDeclaration, result);
+                        }
+                    }
                 }
             }
 
@@ -154,6 +181,8 @@ namespace Probe.Services.Analysis
                 }
 
                 ExtractOverrideDispatch(compilationCache, method, symbolData, result);
+                ExtractLifecycleEntrypoints(method, symbolData, result);
+                ExtractSerializationConventionEntrypoints(method, declarationNode, symbolData, result);
             }
 
             if ((symbol is IMethodSymbol && IsExecutableNode(declarationNode))
@@ -169,6 +198,29 @@ namespace Probe.Services.Analysis
             }
         }
 
+        private void ProcessPrimaryConstructorSymbol(INamedTypeSymbol typeSymbol, TypeDeclarationSyntax typeDeclaration, ExtractionResult result)
+        {
+            var parameterCount = typeDeclaration.ParameterList?.Parameters.Count ?? 0;
+            var constructorSymbol = typeSymbol.InstanceConstructors
+                .FirstOrDefault(ctor => ctor.Parameters.Length == parameterCount);
+            if (constructorSymbol == null)
+            {
+                return;
+            }
+
+            var symbolData = MapToData(constructorSymbol, typeDeclaration);
+            if (result.Symbols.Any(existing => existing.Fqn == symbolData.Fqn))
+            {
+                return;
+            }
+
+            result.Symbols.Add(symbolData);
+            foreach (var parameter in constructorSymbol.Parameters)
+            {
+                RecordTypeDependency(parameter.Type, symbolData.Fqn, result);
+            }
+        }
+
         private void ProcessAnonymousFunction(CompilationAnalysisCache compilationCache, SemanticModel semanticModel, AnonymousFunctionExpressionSyntax anonymousFunction, ExtractionResult result)
         {
             var enclosingSymbol = GetContainingExecutableMethod(semanticModel.GetEnclosingSymbol(anonymousFunction.SpanStart));
@@ -181,6 +233,7 @@ namespace Probe.Services.Analysis
             result.Symbols.Add(symbolData);
 
             ExtractMethodCalls(compilationCache, semanticModel, anonymousFunction, symbolData, result);
+            ExtractFrameworkConventionDependencies(compilationCache, semanticModel, anonymousFunction, symbolData, result);
             ExtractThreadBoundaries(semanticModel, anonymousFunction, symbolData);
             ExtractFieldAccesses(semanticModel, anonymousFunction, symbolData, result);
             ExtractEventSubscriptions(semanticModel, anonymousFunction, symbolData, result);
@@ -605,9 +658,11 @@ namespace Probe.Services.Analysis
                 if (assignment.IsKind(SyntaxKind.AddAssignmentExpression) ||
                     assignment.IsKind(SyntaxKind.SubtractAssignmentExpression))
                 {
+                    IEventSymbol? eventSymbol = null;
                     var leftInfo = semanticModel.GetSymbolInfo(assignment.Left);
-                    if (leftInfo.Symbol is IEventSymbol eventSymbol)
+                    if (leftInfo.Symbol is IEventSymbol resolvedEventSymbol)
                     {
+                        eventSymbol = resolvedEventSymbol;
                         var eventFqn = eventSymbol.ToDisplayString();
                         var callType = assignment.IsKind(SyntaxKind.AddAssignmentExpression) ? "event_subscribe" : "event_unsubscribe";
                         
@@ -618,25 +673,74 @@ namespace Probe.Services.Analysis
                             CallCount = 1,
                             CallType = callType
                         });
-
                     }
 
+                    var isSubscribe = assignment.IsKind(SyntaxKind.AddAssignmentExpression);
                     foreach (var handlerMethod in ResolveDelegateTargetMethods(semanticModel, assignment.Right))
                     {
+                        var handlerFqn = handlerMethod.OriginalDefinition.ToDisplayString();
                         result.MethodCalls.Add(new MethodCallData
                         {
                             CallerId = symbolData.Fqn,
-                            CalleeId = handlerMethod.OriginalDefinition.ToDisplayString(),
+                            CalleeId = handlerFqn,
                             CallCount = 1,
                             CallType = "delegate_reference"
                         });
+
+                        if (isSubscribe && eventSymbol != null)
+                        {
+                            var dispatchCaller = GetEventDispatchCallerFqn(semanticModel, eventSymbol, result);
+                            if (!string.IsNullOrWhiteSpace(dispatchCaller))
+                            {
+                                result.MethodCalls.Add(new MethodCallData
+                                {
+                                    CallerId = dispatchCaller,
+                                    CalleeId = handlerFqn,
+                                    CallCount = 1,
+                                    CallType = "event_dispatch"
+                                });
+                            }
+                        }
                     }
                 }
             }
         }
 
+        private static string? GetEventDispatchCallerFqn(SemanticModel semanticModel, IEventSymbol eventSymbol, ExtractionResult result)
+        {
+            var eventFqn = eventSymbol.ToDisplayString();
+            var eventNamespace = eventSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+            var eventType = eventSymbol.ContainingType?.ToDisplayString();
+
+            if (!LooksLikeFrameworkOwnedSymbol(eventNamespace, eventType))
+            {
+                return eventFqn;
+            }
+
+            return EnsureSyntheticFrameworkSymbol(
+                result,
+                $"framework::{eventFqn}",
+                eventSymbol.Name,
+                "Framework.Events",
+                eventType,
+                eventSymbol.Type?.ToDisplayString(),
+                eventSymbol.Type is INamedTypeSymbol namedType ? namedType.DelegateInvokeMethod?.Parameters.Length ?? 0 : 0);
+        }
+
         private static IEnumerable<IMethodSymbol> ResolveDelegateTargetMethods(SemanticModel semanticModel, ExpressionSyntax expression)
         {
+            if (expression is AnonymousFunctionExpressionSyntax anonymousFunction)
+            {
+                var anonymousSymbol = semanticModel.GetOperation(anonymousFunction) is IAnonymousFunctionOperation anonymousOperation
+                    ? anonymousOperation.Symbol
+                    : null;
+                if (anonymousSymbol != null)
+                {
+                    yield return anonymousSymbol;
+                    yield break;
+                }
+            }
+
             var directInfo = semanticModel.GetSymbolInfo(expression);
             if (directInfo.Symbol is IMethodSymbol directMethod)
             {
@@ -711,11 +815,336 @@ namespace Probe.Services.Analysis
             var current = type;
             while (current != null)
             {
-                if (current.ToDisplayString() == baseTypeFqn)
+                if (string.Equals(current.ToDisplayString(), baseTypeFqn, StringComparison.Ordinal) ||
+                    string.Equals(current.OriginalDefinition.ToDisplayString(), baseTypeFqn, StringComparison.Ordinal))
+                {
                     return true;
+                }
+
                 current = current.BaseType;
             }
             return false;
+        }
+
+        private static bool LooksLikeFrameworkOwnedSymbol(string symbolNamespace, string? containingType)
+        {
+            if (symbolNamespace.StartsWith("System.", StringComparison.Ordinal) ||
+                symbolNamespace.StartsWith("Microsoft.", StringComparison.Ordinal) ||
+                symbolNamespace.StartsWith("Windows.", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return containingType != null && (
+                containingType.StartsWith("System.", StringComparison.Ordinal) ||
+                containingType.StartsWith("Microsoft.", StringComparison.Ordinal) ||
+                containingType.StartsWith("Windows.", StringComparison.Ordinal));
+        }
+
+        private static void ExtractLifecycleEntrypoints(IMethodSymbol method, SymbolData symbolData, ExtractionResult result)
+        {
+            foreach (var entrypoint in GetLifecycleEntrypoints(method))
+            {
+                var callerFqn = EnsureSyntheticFrameworkSymbol(
+                    result,
+                    entrypoint.FrameworkCallerFqn,
+                    entrypoint.FrameworkCallerName,
+                    entrypoint.FrameworkNamespace,
+                    entrypoint.FrameworkContainingType,
+                    "void",
+                    method.Parameters.Length);
+
+                result.MethodCalls.Add(new MethodCallData
+                {
+                    CallerId = callerFqn,
+                    CalleeId = symbolData.Fqn,
+                    CallCount = 1,
+                    CallType = entrypoint.CallType
+                });
+            }
+        }
+
+        private static IEnumerable<FrameworkEntrypoint> GetLifecycleEntrypoints(IMethodSymbol method)
+        {
+            var methodName = method.Name;
+            var containingTypeName = method.ContainingType?.Name ?? "";
+            var containingTypeFqn = method.ContainingType?.ToDisplayString() ?? "";
+
+            if (string.Equals(methodName, "Main", StringComparison.Ordinal) ||
+                string.Equals(methodName, "MainAsync", StringComparison.Ordinal))
+            {
+                yield return new FrameworkEntrypoint(
+                    "framework::dotnet.runtime.entrypoint",
+                    "Entrypoint",
+                    "Framework.Runtime",
+                    "DotNetRuntime",
+                    "lifecycle_entrypoint");
+            }
+
+            if (string.Equals(methodName, "CreateHostBuilder", StringComparison.Ordinal) ||
+                string.Equals(methodName, "CreateWebHostBuilder", StringComparison.Ordinal))
+            {
+                yield return new FrameworkEntrypoint(
+                    $"framework::dotnet.host_builder.{methodName}",
+                    methodName,
+                    "Framework.Runtime",
+                    "DotNetHostBuilder",
+                    "lifecycle_entrypoint");
+            }
+
+            if (string.Equals(containingTypeName, "Startup", StringComparison.Ordinal) &&
+                string.Equals(methodName, "ConfigureServices", StringComparison.Ordinal))
+            {
+                yield return new FrameworkEntrypoint(
+                    "framework::aspnet.startup.ConfigureServices",
+                    "ConfigureServices",
+                    "Framework.AspNetCore",
+                    "Startup",
+                    "lifecycle_entrypoint");
+            }
+
+            if (string.Equals(containingTypeName, "Startup", StringComparison.Ordinal) &&
+                string.Equals(methodName, "Configure", StringComparison.Ordinal))
+            {
+                yield return new FrameworkEntrypoint(
+                    "framework::aspnet.startup.Configure",
+                    "Configure",
+                    "Framework.AspNetCore",
+                    "Startup",
+                    "lifecycle_entrypoint");
+            }
+
+            if (LooksLikeUiApplicationLifecycle(containingTypeName, containingTypeFqn, method))
+            {
+                yield return new FrameworkEntrypoint(
+                    $"framework::ui.lifecycle.{methodName}",
+                    methodName,
+                    "Framework.UI",
+                    "ApplicationLifecycle",
+                    "lifecycle_entrypoint");
+            }
+        }
+
+        private static bool LooksLikeUiApplicationLifecycle(string containingTypeName, string containingTypeFqn, IMethodSymbol method)
+        {
+            var lifecycleMethods = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "OnStartup",
+                "OnActivated",
+                "OnLaunched",
+                "OnBackgroundActivated",
+                "OnFrameworkInitializationCompleted",
+                "OnExit",
+                "OnNavigatedTo",
+                "OnNavigatedFrom",
+                "OnAppearing",
+                "OnDisappearing",
+                "OnInitialized"
+            };
+
+            if (!lifecycleMethods.Contains(method.Name))
+            {
+                return false;
+            }
+
+            return string.Equals(containingTypeName, "App", StringComparison.Ordinal) ||
+                   IsOrDerivedFrom(method.ContainingType, "Windows.UI.Xaml.Application") ||
+                   IsOrDerivedFrom(method.ContainingType, "System.Windows.Application") ||
+                   containingTypeFqn.EndsWith(".App", StringComparison.Ordinal);
+        }
+
+        private static void ExtractSerializationConventionEntrypoints(IMethodSymbol method, SyntaxNode declarationNode, SymbolData symbolData, ExtractionResult result)
+        {
+            foreach (var entrypoint in GetSerializationEntrypoints(method, declarationNode))
+            {
+                var callerFqn = EnsureSyntheticFrameworkSymbol(
+                    result,
+                    entrypoint.FrameworkCallerFqn,
+                    entrypoint.FrameworkCallerName,
+                    entrypoint.FrameworkNamespace,
+                    entrypoint.FrameworkContainingType,
+                    "void",
+                    method.Parameters.Length);
+
+                result.MethodCalls.Add(new MethodCallData
+                {
+                    CallerId = callerFqn,
+                    CalleeId = symbolData.Fqn,
+                    CallCount = 1,
+                    CallType = entrypoint.CallType
+                });
+            }
+        }
+
+        private static IEnumerable<FrameworkEntrypoint> GetSerializationEntrypoints(IMethodSymbol method, SyntaxNode declarationNode)
+        {
+            foreach (var callbackName in GetSerializationCallbackAttributeNames(method, declarationNode))
+            {
+                yield return new FrameworkEntrypoint(
+                    $"framework::serialization.attribute.{callbackName}",
+                    callbackName,
+                    "Framework.Serialization",
+                    "SerializerCallback",
+                    "serialization_callback");
+            }
+
+            if (LooksLikeNewtonsoftJsonConverterCallback(method))
+            {
+                yield return new FrameworkEntrypoint(
+                    $"framework::serialization.json_converter.{method.Name}",
+                    method.Name,
+                    "Framework.Serialization",
+                    "NewtonsoftJsonConverter",
+                    "serialization_callback");
+            }
+
+            if (LooksLikeContractResolverCallback(method))
+            {
+                yield return new FrameworkEntrypoint(
+                    $"framework::serialization.contract_resolver.{method.Name}",
+                    method.Name,
+                    "Framework.Serialization",
+                    "ContractResolver",
+                    "serialization_callback");
+            }
+        }
+
+        private static bool LooksLikeNewtonsoftJsonConverterCallback(IMethodSymbol method)
+        {
+            if (method.Name is not ("ReadJson" or "WriteJson" or "CanConvert" or "Read" or "Write" or "ReadAsPropertyName" or "WriteAsPropertyName"))
+            {
+                return false;
+            }
+
+            if (IsOrDerivedFrom(method.ContainingType, "Newtonsoft.Json.JsonConverter") ||
+                IsOrDerivedFrom(method.ContainingType, "Newtonsoft.Json.JsonConverter<T>") ||
+                IsOrDerivedFrom(method.ContainingType, "System.Text.Json.Serialization.JsonConverter") ||
+                IsOrDerivedFrom(method.ContainingType, "System.Text.Json.Serialization.JsonConverter<T>"))
+            {
+                return true;
+            }
+
+            var containingTypeName = method.ContainingType?.Name ?? "";
+            if (!containingTypeName.EndsWith("Converter", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var parameterTypes = method.Parameters
+                .Select(parameter => parameter.Type.OriginalDefinition.ToDisplayString())
+                .ToArray();
+
+            return method.Name switch
+            {
+                "ReadJson" => parameterTypes.Any(type => type.EndsWith("JsonReader", StringComparison.Ordinal)),
+                "WriteJson" => parameterTypes.Any(type => type.EndsWith("JsonWriter", StringComparison.Ordinal)),
+                "CanConvert" => parameterTypes.Any(type => string.Equals(type, "System.Type", StringComparison.Ordinal)),
+                "Read" => parameterTypes.Any(type => type.EndsWith("Utf8JsonReader", StringComparison.Ordinal)),
+                "Write" => parameterTypes.Any(type => type.EndsWith("Utf8JsonWriter", StringComparison.Ordinal)),
+                "ReadAsPropertyName" => parameterTypes.Any(type => type.EndsWith("Utf8JsonReader", StringComparison.Ordinal)),
+                "WriteAsPropertyName" => parameterTypes.Any(type => type.EndsWith("Utf8JsonWriter", StringComparison.Ordinal)),
+                _ => false
+            };
+        }
+
+        private static bool LooksLikeContractResolverCallback(IMethodSymbol method)
+        {
+            if (method.Name is not ("CreateProperty" or "CreateContract" or "CreateDictionaryContract"))
+            {
+                return false;
+            }
+
+            if (IsOrDerivedFrom(method.ContainingType, "Newtonsoft.Json.Serialization.DefaultContractResolver"))
+            {
+                return true;
+            }
+
+            var containingTypeName = method.ContainingType?.Name ?? "";
+            return containingTypeName.EndsWith("ContractResolver", StringComparison.Ordinal);
+        }
+
+        private static IEnumerable<string> GetSerializationCallbackAttributeNames(IMethodSymbol method, SyntaxNode declarationNode)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var attribute in method.GetAttributes())
+            {
+                var attributeName = attribute.AttributeClass?.Name ?? "";
+                if (TryNormalizeSerializationCallbackAttributeName(attributeName, out var callbackName))
+                {
+                    names.Add(callbackName);
+                }
+            }
+
+            if (declarationNode is MemberDeclarationSyntax memberDeclaration)
+            {
+                foreach (var attributeList in memberDeclaration.AttributeLists)
+                {
+                    foreach (var attribute in attributeList.Attributes)
+                    {
+                        var attributeName = attribute.Name.ToString();
+                        if (TryNormalizeSerializationCallbackAttributeName(attributeName, out var callbackName))
+                        {
+                            names.Add(callbackName);
+                        }
+                    }
+                }
+            }
+
+            return names;
+        }
+
+        private static bool TryNormalizeSerializationCallbackAttributeName(string attributeName, out string callbackName)
+        {
+            callbackName = string.Empty;
+            if (string.IsNullOrWhiteSpace(attributeName))
+            {
+                return false;
+            }
+
+            var simpleName = attributeName.Split('.').Last();
+            if (simpleName is "OnDeserializedAttribute" or "OnDeserializingAttribute" or "OnSerializedAttribute" or "OnSerializingAttribute")
+            {
+                callbackName = simpleName.Replace("Attribute", string.Empty, StringComparison.Ordinal);
+                return true;
+            }
+
+            if (simpleName is "OnDeserialized" or "OnDeserializing" or "OnSerialized" or "OnSerializing")
+            {
+                callbackName = simpleName;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static string EnsureSyntheticFrameworkSymbol(
+            ExtractionResult result,
+            string fqn,
+            string name,
+            string frameworkNamespace,
+            string? containingType,
+            string? returnType,
+            int parameterCount)
+        {
+            if (!result.Symbols.Any(symbol => string.Equals(symbol.Fqn, fqn, StringComparison.Ordinal)))
+            {
+                result.Symbols.Add(new SymbolData
+                {
+                    Id = GetStableHash(fqn),
+                    Fqn = fqn,
+                    Name = name,
+                    Kind = "framework_method",
+                    Namespace = frameworkNamespace,
+                    ContainingType = containingType,
+                    Accessibility = "public",
+                    IsStatic = true,
+                    IsAsync = false,
+                    ParameterCount = parameterCount,
+                    ReturnType = returnType,
+                });
+            }
+
+            return fqn;
         }
 
         private static bool ShouldExpandDynamicDispatch(InvocationExpressionSyntax invocation, IMethodSymbol calledMethod)
@@ -728,6 +1157,16 @@ namespace Probe.Services.Analysis
             foreach (var invocation in GetAnalysisDescendantNodes(node).OfType<InvocationExpressionSyntax>())
             {
                 var calledMethod = ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation));
+                if (TryExtractReflectionConstructorDispatch(compilationCache, semanticModel, node, invocation, calledMethod, symbolData, result))
+                {
+                    continue;
+                }
+
+                if (TryExtractServiceResolutionDispatch(compilationCache, semanticModel, invocation, calledMethod, symbolData, result))
+                {
+                    continue;
+                }
+
                 if (calledMethod == null)
                 {
                     continue;
@@ -742,7 +1181,44 @@ namespace Probe.Services.Analysis
                 {
                     continue;
                 }
+
             }
+        }
+
+        private static bool TryExtractServiceResolutionDispatch(
+            CompilationAnalysisCache compilationCache,
+            SemanticModel semanticModel,
+            InvocationExpressionSyntax invocation,
+            IMethodSymbol? calledMethod,
+            SymbolData symbolData,
+            ExtractionResult result)
+        {
+            if (!IsServiceResolutionMethod(calledMethod, invocation, out var resolutionKind))
+            {
+                return false;
+            }
+
+            var requestedTypeFqn = ResolveRequestedServiceType(semanticModel, invocation, calledMethod);
+            if (string.IsNullOrWhiteSpace(requestedTypeFqn))
+            {
+                return false;
+            }
+
+            var constructorTargets = compilationCache.ResolveServiceDispatchConstructors(requestedTypeFqn);
+            var added = false;
+            foreach (var target in constructorTargets)
+            {
+                result.MethodCalls.Add(new MethodCallData
+                {
+                    CallerId = symbolData.Fqn,
+                    CalleeId = target,
+                    CallCount = 1,
+                    CallType = resolutionKind
+                });
+                added = true;
+            }
+
+            return added;
         }
 
         private static bool TryExtractMvvmToolkitMessagingDispatch(
@@ -820,6 +1296,1043 @@ namespace Probe.Services.Analysis
             var containingNamespace = calledMethod.ContainingNamespace?.ToDisplayString() ?? "";
             return string.Equals(calledMethod.Name, "RegisterAssemblyModules", StringComparison.Ordinal)
                 && containingNamespace.Contains("Autofac", StringComparison.Ordinal);
+        }
+
+        private static bool TryExtractReflectionConstructorDispatch(
+            CompilationAnalysisCache compilationCache,
+            SemanticModel semanticModel,
+            SyntaxNode scopeNode,
+            InvocationExpressionSyntax invocation,
+            IMethodSymbol? calledMethod,
+            SymbolData symbolData,
+            ExtractionResult result)
+        {
+            if (LooksLikeGetConstructorSyntax(invocation) &&
+                invocation.Expression is MemberAccessExpressionSyntax getConstructorAccess)
+            {
+                var lookupParameterTypes = ResolveReflectedTypeDescriptorArguments(
+                    semanticModel,
+                    scopeNode,
+                    invocation.SpanStart,
+                    invocation.ArgumentList.Arguments)
+                    .ToList();
+
+                if (lookupParameterTypes.Count > 0 &&
+                    TryResolveReflectedConstructorTargets(
+                        compilationCache,
+                        semanticModel,
+                        scopeNode,
+                        invocation.SpanStart,
+                        getConstructorAccess.Expression,
+                        lookupParameterTypes,
+                        out var lookupTargets))
+                {
+                    foreach (var target in lookupTargets)
+                    {
+                        result.MethodCalls.Add(new MethodCallData
+                        {
+                            CallerId = symbolData.Fqn,
+                            CalleeId = target,
+                            CallCount = 1,
+                            CallType = "reflection_constructor_dispatch"
+                        });
+                    }
+
+                    return true;
+                }
+            }
+
+            if (IsConstructorInfoInvoke(calledMethod) || LooksLikeConstructorInvokeSyntax(invocation))
+            {
+                if (TryResolveConstructorInfoDispatch(
+                    compilationCache,
+                    semanticModel,
+                    scopeNode,
+                    invocation,
+                    symbolData,
+                    out var constructorTargets))
+                {
+                    foreach (var target in constructorTargets)
+                    {
+                        result.MethodCalls.Add(new MethodCallData
+                        {
+                            CallerId = symbolData.Fqn,
+                            CalleeId = target,
+                            CallCount = 1,
+                            CallType = "reflection_constructor_dispatch"
+                        });
+                    }
+                }
+
+                return true;
+            }
+
+            if (!IsActivatorCreateInstance(calledMethod) &&
+                !LooksLikeActivatorCreateInstanceSyntax(invocation) ||
+                invocation.ArgumentList.Arguments.Count == 0)
+            {
+                return false;
+            }
+
+            var typeArgument = invocation.ArgumentList.Arguments[0].Expression;
+            var parameterTypes = ResolveRuntimeArgumentTypes(semanticModel, invocation.ArgumentList.Arguments.Skip(1)).ToList();
+            if (!TryResolveReflectedConstructorTargets(
+                compilationCache,
+                semanticModel,
+                scopeNode,
+                invocation.SpanStart,
+                typeArgument,
+                parameterTypes,
+                out var activatorTargets))
+            {
+                return false;
+            }
+
+            foreach (var target in activatorTargets)
+            {
+                result.MethodCalls.Add(new MethodCallData
+                {
+                    CallerId = symbolData.Fqn,
+                    CalleeId = target,
+                    CallCount = 1,
+                    CallType = "reflection_constructor_dispatch"
+                });
+            }
+
+            return true;
+        }
+
+        private static bool TryResolveConstructorInfoDispatch(
+            CompilationAnalysisCache compilationCache,
+            SemanticModel semanticModel,
+            SyntaxNode scopeNode,
+            InvocationExpressionSyntax invocation,
+            SymbolData symbolData,
+            out IReadOnlyCollection<string> constructorTargets)
+        {
+            constructorTargets = Array.Empty<string>();
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess ||
+                memberAccess.Expression is not IdentifierNameSyntax constructorIdentifier)
+            {
+                return false;
+            }
+
+            if (!TryFindLatestAssignmentExpression(scopeNode, constructorIdentifier.Identifier.ValueText, invocation.SpanStart, out var assignedExpression))
+            {
+                return false;
+            }
+
+            if (assignedExpression is not InvocationExpressionSyntax constructorLookup ||
+                constructorLookup.Expression is not MemberAccessExpressionSyntax constructorLookupAccess ||
+                !string.Equals(constructorLookupAccess.Name.Identifier.ValueText, "GetConstructor", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (constructorLookup.ArgumentList.Arguments.Count == 0)
+            {
+                return false;
+            }
+
+            var typeExpression = constructorLookupAccess.Expression;
+            var parameterTypes = ResolveReflectedTypeDescriptorArguments(
+                semanticModel,
+                scopeNode,
+                invocation.SpanStart,
+                constructorLookup.ArgumentList.Arguments)
+                .ToList();
+
+            if (parameterTypes.Count == 0)
+            {
+                return false;
+            }
+
+            if (!TryResolveReflectedConstructorTargets(
+                compilationCache,
+                semanticModel,
+                scopeNode,
+                invocation.SpanStart,
+                typeExpression,
+                parameterTypes,
+                out var targets))
+            {
+                return false;
+            }
+
+            constructorTargets = targets;
+            return constructorTargets.Count > 0;
+        }
+
+        private static bool TryResolveReflectedConstructorTargets(
+            CompilationAnalysisCache compilationCache,
+            SemanticModel semanticModel,
+            SyntaxNode scopeNode,
+            int usagePosition,
+            ExpressionSyntax typeExpression,
+            IReadOnlyList<string> parameterTypes,
+            out IReadOnlyCollection<string> constructorTargets)
+        {
+            constructorTargets = Array.Empty<string>();
+            var candidateTypes = ResolveReflectedTypeCandidates(compilationCache, semanticModel, scopeNode, usagePosition, typeExpression);
+            if (candidateTypes.Count == 0)
+            {
+                return false;
+            }
+
+            var resolvedTargets = compilationCache
+                .GetConstructorCandidates(candidateTypes, parameterTypes)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (resolvedTargets.Count == 0)
+            {
+                return false;
+            }
+
+            constructorTargets = resolvedTargets;
+            return true;
+        }
+
+        private static HashSet<string> ResolveReflectedTypeCandidates(
+            CompilationAnalysisCache compilationCache,
+            SemanticModel semanticModel,
+            SyntaxNode scopeNode,
+            int usagePosition,
+            ExpressionSyntax expression)
+        {
+            expression = UnwrapExpression(expression);
+
+            if (expression is InvocationExpressionSyntax invocation &&
+                invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+            {
+                var methodName = memberAccess.Name.Identifier.ValueText;
+                if (string.Equals(methodName, "GetTypes", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "GetExportedTypes", StringComparison.Ordinal))
+                {
+                    return compilationCache.GetAllTypeFqns();
+                }
+
+                if (string.Equals(methodName, "Where", StringComparison.Ordinal))
+                {
+                    var source = ResolveReflectedTypeCandidates(compilationCache, semanticModel, scopeNode, usagePosition, memberAccess.Expression);
+                    if (source.Count == 0 || invocation.ArgumentList.Arguments.Count == 0)
+                    {
+                        return source;
+                    }
+
+                    var lambda = ExtractLambda(invocation.ArgumentList.Arguments[0].Expression);
+                    if (lambda == null)
+                    {
+                        return source;
+                    }
+
+                    var parameterName = GetSingleLambdaParameterName(lambda);
+                    if (string.IsNullOrWhiteSpace(parameterName))
+                    {
+                        return source;
+                    }
+
+                    var filtered = source
+                        .Where(typeFqn => compilationCache.TryGetTypeMetadata(typeFqn, out var metadata) &&
+                                          EvaluateTypePredicate(compilationCache, semanticModel, lambda.Body, parameterName, metadata))
+                        .ToHashSet(StringComparer.Ordinal);
+                    return filtered;
+                }
+
+                if (string.Equals(methodName, "Select", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "ToList", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "ToArray", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "AsEnumerable", StringComparison.Ordinal))
+                {
+                    return ResolveReflectedTypeCandidates(compilationCache, semanticModel, scopeNode, usagePosition, memberAccess.Expression);
+                }
+
+                if (string.Equals(methodName, "First", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "FirstOrDefault", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "Single", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "SingleOrDefault", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "Last", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "LastOrDefault", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "ElementAt", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "ElementAtOrDefault", StringComparison.Ordinal))
+                {
+                    return ResolveReflectedTypeCandidates(compilationCache, semanticModel, scopeNode, usagePosition, memberAccess.Expression);
+                }
+            }
+
+            if (expression is IdentifierNameSyntax identifier)
+            {
+                var declaredSymbol = semanticModel.GetSymbolInfo(identifier).Symbol;
+                if (declaredSymbol is IParameterSymbol parameter && parameter.ContainingSymbol is IMethodSymbol { MethodKind: MethodKind.AnonymousFunction })
+                {
+                    var lambda = identifier.Ancestors().OfType<AnonymousFunctionExpressionSyntax>().FirstOrDefault();
+                    var selectInvocation = lambda?
+                        .Ancestors()
+                        .OfType<InvocationExpressionSyntax>()
+                        .FirstOrDefault(candidate =>
+                            candidate.Expression is MemberAccessExpressionSyntax candidateAccess &&
+                            string.Equals(candidateAccess.Name.Identifier.ValueText, "Select", StringComparison.Ordinal) &&
+                            candidate.ArgumentList.Arguments.Any(argument => argument.Expression == lambda));
+                    if (selectInvocation?.Expression is MemberAccessExpressionSyntax selectAccess)
+                    {
+                        return ResolveReflectedTypeCandidates(compilationCache, semanticModel, scopeNode, usagePosition, selectAccess.Expression);
+                    }
+                }
+
+                if (declaredSymbol is ILocalSymbol localSymbol)
+                {
+                    foreach (var declaringSyntax in localSymbol.DeclaringSyntaxReferences)
+                    {
+                        var declaringNode = declaringSyntax.GetSyntax();
+                        if (declaringNode is ForEachStatementSyntax forEachStatement)
+                        {
+                            var sourceTypes = ResolveReflectedTypeCandidates(
+                                compilationCache,
+                                semanticModel,
+                                scopeNode,
+                                usagePosition,
+                                forEachStatement.Expression);
+
+                            return ApplyForeachTypeGuards(
+                                compilationCache,
+                                semanticModel,
+                                forEachStatement,
+                                usagePosition,
+                                localSymbol.Name,
+                                sourceTypes);
+                        }
+                    }
+                }
+
+                if (TryFindLatestAssignmentExpression(scopeNode, identifier.Identifier.ValueText, usagePosition, out var assignedExpression))
+                {
+                    return ResolveReflectedTypeCandidates(compilationCache, semanticModel, scopeNode, assignedExpression.SpanStart, assignedExpression);
+                }
+            }
+
+            if (expression is InvocationExpressionSyntax getTypeInvocation &&
+                getTypeInvocation.Expression is MemberAccessExpressionSyntax getTypeAccess &&
+                string.Equals(getTypeAccess.Name.Identifier.ValueText, "GetType", StringComparison.Ordinal) &&
+                getTypeInvocation.ArgumentList.Arguments.Count == 0)
+            {
+                var receiverType = ResolveEffectiveTypeSymbol(semanticModel, scopeNode, semanticModel.GetTypeInfo(getTypeAccess.Expression).Type);
+                if (receiverType != null)
+                {
+                    return compilationCache.GetConcreteTypesAssignableTo(receiverType.OriginalDefinition.ToDisplayString());
+                }
+
+                return ResolveReflectedTypeCandidates(
+                    compilationCache,
+                    semanticModel,
+                    scopeNode,
+                    usagePosition,
+                    getTypeAccess.Expression);
+            }
+
+            if (expression is ElementAccessExpressionSyntax elementAccess)
+            {
+                var elementType = ResolveEffectiveTypeSymbol(semanticModel, scopeNode, semanticModel.GetTypeInfo(elementAccess).Type);
+                if (elementType != null)
+                {
+                    return compilationCache.GetConcreteTypesAssignableTo(elementType.OriginalDefinition.ToDisplayString());
+                }
+            }
+
+            if (expression is TypeOfExpressionSyntax typeOfExpression)
+            {
+                var type = semanticModel.GetTypeInfo(typeOfExpression.Type).Type;
+                if (type != null)
+                {
+                    return new HashSet<string>(StringComparer.Ordinal) { type.OriginalDefinition.ToDisplayString() };
+                }
+            }
+
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        private static bool TryFindLatestAssignmentExpression(
+            SyntaxNode scopeNode,
+            string identifier,
+            int usagePosition,
+            out ExpressionSyntax expression)
+        {
+            expression = null!;
+            ExpressionSyntax? latest = null;
+            var latestPosition = -1;
+
+            foreach (var searchScope in GetAssignmentSearchScopes(scopeNode))
+            {
+                foreach (var declarator in GetAnalysisDescendantNodes(searchScope).OfType<VariableDeclaratorSyntax>())
+                {
+                    if (!string.Equals(declarator.Identifier.ValueText, identifier, StringComparison.Ordinal) ||
+                        declarator.SpanStart >= usagePosition ||
+                        declarator.Initializer == null)
+                    {
+                        continue;
+                    }
+
+                    if (declarator.SpanStart > latestPosition)
+                    {
+                        latest = declarator.Initializer.Value;
+                        latestPosition = declarator.SpanStart;
+                    }
+                }
+
+                foreach (var assignment in GetAnalysisDescendantNodes(searchScope).OfType<AssignmentExpressionSyntax>())
+                {
+                    if (!assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) ||
+                        assignment.SpanStart >= usagePosition ||
+                        assignment.Left is not IdentifierNameSyntax leftIdentifier ||
+                        !string.Equals(leftIdentifier.Identifier.ValueText, identifier, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (assignment.SpanStart > latestPosition)
+                    {
+                        latest = assignment.Right;
+                        latestPosition = assignment.SpanStart;
+                    }
+                }
+            }
+
+            if (latest == null)
+            {
+                return false;
+            }
+
+            expression = latest;
+            return true;
+        }
+
+        private static IEnumerable<SyntaxNode> GetAssignmentSearchScopes(SyntaxNode scopeNode)
+        {
+            for (SyntaxNode? current = scopeNode; current != null; current = current.Parent)
+            {
+                switch (current)
+                {
+                    case AnonymousFunctionExpressionSyntax anonymousFunction:
+                        yield return anonymousFunction;
+                        break;
+
+                    case BaseMethodDeclarationSyntax methodDeclaration:
+                        yield return methodDeclaration;
+                        break;
+
+                    case LocalFunctionStatementSyntax localFunction:
+                        yield return localFunction;
+                        break;
+
+                    case AccessorDeclarationSyntax accessor:
+                        yield return accessor;
+                        break;
+                }
+            }
+        }
+
+        private static IEnumerable<string> ResolveReflectedTypeDescriptorArguments(
+            SemanticModel semanticModel,
+            SyntaxNode scopeNode,
+            int usagePosition,
+            IEnumerable<ArgumentSyntax> arguments)
+        {
+            foreach (var argument in arguments)
+            {
+                foreach (var typeName in ResolveTypeDescriptorNamesFromExpression(semanticModel, scopeNode, usagePosition, argument.Expression))
+                {
+                    yield return typeName;
+                }
+            }
+        }
+
+        private static IEnumerable<string> ResolveTypeDescriptorNamesFromExpression(
+            SemanticModel semanticModel,
+            SyntaxNode scopeNode,
+            int usagePosition,
+            ExpressionSyntax expression)
+        {
+            expression = UnwrapExpression(expression);
+
+            if (expression is IdentifierNameSyntax identifier &&
+                TryFindLatestAssignmentExpression(scopeNode, identifier.Identifier.ValueText, usagePosition, out var assignedExpression))
+            {
+                foreach (var typeName in ResolveTypeDescriptorNamesFromExpression(semanticModel, scopeNode, assignedExpression.SpanStart, assignedExpression))
+                {
+                    yield return typeName;
+                }
+
+                yield break;
+            }
+
+            if (expression is ArrayCreationExpressionSyntax arrayCreation && arrayCreation.Initializer != null)
+            {
+                foreach (var item in arrayCreation.Initializer.Expressions)
+                {
+                    foreach (var typeName in ResolveTypeDescriptorNamesFromExpression(semanticModel, scopeNode, usagePosition, item))
+                    {
+                        yield return typeName;
+                    }
+                }
+
+                yield break;
+            }
+
+            if (expression is ImplicitArrayCreationExpressionSyntax implicitArray && implicitArray.Initializer != null)
+            {
+                foreach (var item in implicitArray.Initializer.Expressions)
+                {
+                    foreach (var typeName in ResolveTypeDescriptorNamesFromExpression(semanticModel, scopeNode, usagePosition, item))
+                    {
+                        yield return typeName;
+                    }
+                }
+
+                yield break;
+            }
+
+            if (expression is TypeOfExpressionSyntax typeOfExpression)
+            {
+                var type = semanticModel.GetTypeInfo(typeOfExpression.Type).Type;
+                if (type != null)
+                {
+                    yield return type.OriginalDefinition.ToDisplayString();
+                }
+            }
+        }
+
+        private static IEnumerable<string> ResolveRuntimeArgumentTypes(SemanticModel semanticModel, IEnumerable<ArgumentSyntax> arguments)
+        {
+            foreach (var argument in arguments)
+            {
+                var type = semanticModel.GetTypeInfo(argument.Expression).Type;
+                if (type != null)
+                {
+                    yield return type.OriginalDefinition.ToDisplayString();
+                }
+            }
+        }
+
+        private static ITypeSymbol? ResolveEffectiveTypeSymbol(
+            SemanticModel semanticModel,
+            SyntaxNode scopeNode,
+            ITypeSymbol? typeSymbol)
+        {
+            while (typeSymbol is ITypeParameterSymbol typeParameter &&
+                   TryResolveConstructedTypeParameter(semanticModel, scopeNode, typeParameter, out var resolvedType))
+            {
+                typeSymbol = resolvedType;
+            }
+
+            return typeSymbol;
+        }
+
+        private static bool TryResolveConstructedTypeParameter(
+            SemanticModel semanticModel,
+            SyntaxNode scopeNode,
+            ITypeParameterSymbol typeParameter,
+            out ITypeSymbol resolvedType)
+        {
+            resolvedType = null!;
+            if (typeParameter.ContainingSymbol is not INamedTypeSymbol declaringType)
+            {
+                return false;
+            }
+
+            var currentType = scopeNode
+                .AncestorsAndSelf()
+                .OfType<TypeDeclarationSyntax>()
+                .Select(typeDeclaration => semanticModel.GetDeclaredSymbol(typeDeclaration))
+                .OfType<INamedTypeSymbol>()
+                .FirstOrDefault();
+
+            for (var candidate = currentType; candidate != null; candidate = candidate.BaseType)
+            {
+                if (!SymbolEqualityComparer.Default.Equals(candidate.OriginalDefinition, declaringType.OriginalDefinition))
+                {
+                    continue;
+                }
+
+                var parameterIndex = -1;
+                for (var i = 0; i < declaringType.TypeParameters.Length; i++)
+                {
+                    if (SymbolEqualityComparer.Default.Equals(declaringType.TypeParameters[i], typeParameter))
+                    {
+                        parameterIndex = i;
+                        break;
+                    }
+                }
+
+                if (parameterIndex < 0 || parameterIndex >= candidate.TypeArguments.Length)
+                {
+                    return false;
+                }
+
+                resolvedType = candidate.TypeArguments[parameterIndex];
+                return true;
+            }
+
+            return false;
+        }
+
+        private static HashSet<string> ApplyForeachTypeGuards(
+            CompilationAnalysisCache compilationCache,
+            SemanticModel semanticModel,
+            ForEachStatementSyntax forEachStatement,
+            int usagePosition,
+            string parameterName,
+            HashSet<string> sourceTypes)
+        {
+            if (sourceTypes.Count == 0 || forEachStatement.Statement is not BlockSyntax block)
+            {
+                return sourceTypes;
+            }
+
+            var filtered = new HashSet<string>(sourceTypes, StringComparer.Ordinal);
+            foreach (var statement in block.Statements)
+            {
+                if (statement.SpanStart >= usagePosition)
+                {
+                    break;
+                }
+
+                if (statement is not IfStatementSyntax ifStatement ||
+                    !IsContinueOnly(ifStatement.Statement))
+                {
+                    continue;
+                }
+
+                var keepCondition = NegateCondition(ifStatement.Condition);
+                filtered.RemoveWhere(typeFqn =>
+                    !compilationCache.TryGetTypeMetadata(typeFqn, out var metadata) ||
+                    !EvaluateTypePredicateExpression(compilationCache, semanticModel, keepCondition, parameterName, metadata));
+            }
+
+            return filtered;
+        }
+
+        private static bool IsContinueOnly(StatementSyntax statement)
+        {
+            if (statement is ContinueStatementSyntax)
+            {
+                return true;
+            }
+
+            return statement is BlockSyntax block &&
+                   block.Statements.Count == 1 &&
+                   block.Statements[0] is ContinueStatementSyntax;
+        }
+
+        private static ExpressionSyntax NegateCondition(ExpressionSyntax condition)
+        {
+            condition = UnwrapExpression(condition);
+            if (condition is PrefixUnaryExpressionSyntax prefix &&
+                prefix.IsKind(SyntaxKind.LogicalNotExpression))
+            {
+                return (ExpressionSyntax)UnwrapExpression(prefix.Operand);
+            }
+
+            return SyntaxFactory.PrefixUnaryExpression(
+                SyntaxKind.LogicalNotExpression,
+                SyntaxFactory.ParenthesizedExpression(condition));
+        }
+
+        private static AnonymousFunctionExpressionSyntax? ExtractLambda(ExpressionSyntax expression)
+        {
+            expression = UnwrapExpression(expression);
+            return expression as AnonymousFunctionExpressionSyntax;
+        }
+
+        private static string? GetSingleLambdaParameterName(AnonymousFunctionExpressionSyntax lambda)
+        {
+            return lambda switch
+            {
+                SimpleLambdaExpressionSyntax simple => simple.Parameter.Identifier.ValueText,
+                ParenthesizedLambdaExpressionSyntax parenthesized when parenthesized.ParameterList.Parameters.Count == 1 => parenthesized.ParameterList.Parameters[0].Identifier.ValueText,
+                AnonymousMethodExpressionSyntax anonymousMethod when anonymousMethod.ParameterList?.Parameters.Count == 1 => anonymousMethod.ParameterList.Parameters[0].Identifier.ValueText,
+                _ => null
+            };
+        }
+
+        private static bool EvaluateTypePredicate(
+            CompilationAnalysisCache compilationCache,
+            SemanticModel semanticModel,
+            CSharpSyntaxNode body,
+            string parameterName,
+            ReflectionTypeMetadata metadata)
+        {
+            if (body is BlockSyntax block)
+            {
+                var returnStatement = block.DescendantNodes().OfType<ReturnStatementSyntax>().FirstOrDefault();
+                return returnStatement?.Expression != null &&
+                       EvaluateTypePredicateExpression(compilationCache, semanticModel, returnStatement.Expression, parameterName, metadata);
+            }
+
+            return EvaluateTypePredicateExpression(compilationCache, semanticModel, body, parameterName, metadata);
+        }
+
+        private static bool EvaluateTypePredicateExpression(
+            CompilationAnalysisCache compilationCache,
+            SemanticModel semanticModel,
+            SyntaxNode expression,
+            string parameterName,
+            ReflectionTypeMetadata metadata)
+        {
+            if (expression is ExpressionSyntax expressionSyntax)
+            {
+                expression = UnwrapExpression(expressionSyntax);
+            }
+
+            switch (expression)
+            {
+                case PrefixUnaryExpressionSyntax prefix when prefix.IsKind(SyntaxKind.LogicalNotExpression):
+                    return !EvaluateTypePredicateExpression(compilationCache, semanticModel, prefix.Operand, parameterName, metadata);
+
+                case BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.LogicalAndExpression):
+                    return EvaluateTypePredicateExpression(compilationCache, semanticModel, binary.Left, parameterName, metadata)
+                        && EvaluateTypePredicateExpression(compilationCache, semanticModel, binary.Right, parameterName, metadata);
+
+                case BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.LogicalOrExpression):
+                    return EvaluateTypePredicateExpression(compilationCache, semanticModel, binary.Left, parameterName, metadata)
+                        || EvaluateTypePredicateExpression(compilationCache, semanticModel, binary.Right, parameterName, metadata);
+
+                case BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.NotEqualsExpression) || binary.IsKind(SyntaxKind.EqualsExpression):
+                    if (TryResolveTypeMemberString(binary.Left, parameterName, metadata, out var leftValue) &&
+                        TryResolveStringLiteral(binary.Right, out var rightValue))
+                    {
+                        return binary.IsKind(SyntaxKind.EqualsExpression)
+                            ? string.Equals(leftValue, rightValue, StringComparison.Ordinal)
+                            : !string.Equals(leftValue, rightValue, StringComparison.Ordinal);
+                    }
+
+                    if (TryResolveHasConstructorPredicate(binary.Left, parameterName, metadata, out var leftHasConstructor) &&
+                        IsNullLiteral(binary.Right))
+                    {
+                        return binary.IsKind(SyntaxKind.EqualsExpression)
+                            ? !leftHasConstructor
+                            : leftHasConstructor;
+                    }
+
+                    if (TryResolveHasConstructorPredicate(binary.Right, parameterName, metadata, out var rightHasConstructor) &&
+                        IsNullLiteral(binary.Left))
+                    {
+                        return binary.IsKind(SyntaxKind.EqualsExpression)
+                            ? !rightHasConstructor
+                            : rightHasConstructor;
+                    }
+
+                    break;
+
+                case InvocationExpressionSyntax invocation:
+                    if (TryEvaluateAssignableFromPredicate(semanticModel, invocation, parameterName, metadata, out var isAssignable))
+                    {
+                        return isAssignable;
+                    }
+
+                    break;
+
+                case MemberAccessExpressionSyntax memberAccess:
+                    if (TryResolveTypeMemberBoolean(memberAccess, parameterName, metadata, out var memberValue))
+                    {
+                        return memberValue;
+                    }
+
+                    break;
+            }
+
+            return true;
+        }
+
+        private static bool TryResolveTypeMemberBoolean(
+            MemberAccessExpressionSyntax memberAccess,
+            string parameterName,
+            ReflectionTypeMetadata metadata,
+            out bool value)
+        {
+            value = false;
+            if (memberAccess.Expression is not IdentifierNameSyntax identifier ||
+                !string.Equals(identifier.Identifier.ValueText, parameterName, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            value = memberAccess.Name.Identifier.ValueText switch
+            {
+                "IsInterface" => metadata.IsInterface,
+                "IsAbstract" => metadata.IsAbstract,
+                "IsClass" => metadata.IsClass,
+                _ => value
+            };
+
+            return memberAccess.Name.Identifier.ValueText is "IsInterface" or "IsAbstract" or "IsClass";
+        }
+
+        private static bool TryResolveHasConstructorPredicate(
+            SyntaxNode expression,
+            string parameterName,
+            ReflectionTypeMetadata metadata,
+            out bool hasConstructor)
+        {
+            hasConstructor = false;
+            if (expression is ExpressionSyntax expressionSyntax)
+            {
+                expression = UnwrapExpression(expressionSyntax);
+            }
+
+            if (expression is not InvocationExpressionSyntax invocation ||
+                invocation.Expression is not MemberAccessExpressionSyntax memberAccess ||
+                !string.Equals(memberAccess.Name.Identifier.ValueText, "GetConstructor", StringComparison.Ordinal) ||
+                memberAccess.Expression is not IdentifierNameSyntax identifier ||
+                !string.Equals(identifier.Identifier.ValueText, parameterName, StringComparison.Ordinal) ||
+                invocation.ArgumentList.Arguments.Count != 1)
+            {
+                return false;
+            }
+
+            var argumentExpression = UnwrapExpression(invocation.ArgumentList.Arguments[0].Expression);
+            var requestsEmptyTypes =
+                argumentExpression is MemberAccessExpressionSyntax member &&
+                member.Expression is IdentifierNameSyntax typeIdentifier &&
+                string.Equals(typeIdentifier.Identifier.ValueText, "Type", StringComparison.Ordinal) &&
+                string.Equals(member.Name.Identifier.ValueText, "EmptyTypes", StringComparison.Ordinal);
+
+            if (!requestsEmptyTypes)
+            {
+                return false;
+            }
+
+            hasConstructor = metadata.Constructors.Any(constructor => constructor.IsPublic && constructor.ParameterTypes.Count == 0);
+            return true;
+        }
+
+        private static bool TryResolveTypeMemberString(
+            SyntaxNode expression,
+            string parameterName,
+            ReflectionTypeMetadata metadata,
+            out string value)
+        {
+            value = string.Empty;
+            if (expression is ExpressionSyntax expressionSyntax)
+            {
+                expression = UnwrapExpression(expressionSyntax);
+            }
+            if (expression is not MemberAccessExpressionSyntax memberAccess ||
+                memberAccess.Expression is not IdentifierNameSyntax identifier ||
+                !string.Equals(identifier.Identifier.ValueText, parameterName, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (string.Equals(memberAccess.Name.Identifier.ValueText, "Name", StringComparison.Ordinal))
+            {
+                value = metadata.Name;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryResolveStringLiteral(SyntaxNode expression, out string value)
+        {
+            if (expression is ExpressionSyntax expressionSyntax)
+            {
+                expression = UnwrapExpression(expressionSyntax);
+            }
+            if (expression is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.StringLiteralExpression))
+            {
+                value = literal.Token.ValueText;
+                return true;
+            }
+
+            value = string.Empty;
+            return false;
+        }
+
+        private static bool IsNullLiteral(SyntaxNode expression)
+        {
+            if (expression is ExpressionSyntax expressionSyntax)
+            {
+                expression = UnwrapExpression(expressionSyntax);
+            }
+
+            return expression is LiteralExpressionSyntax literal &&
+                   literal.IsKind(SyntaxKind.NullLiteralExpression);
+        }
+
+        private static bool TryEvaluateAssignableFromPredicate(
+            SemanticModel semanticModel,
+            InvocationExpressionSyntax invocation,
+            string parameterName,
+            ReflectionTypeMetadata metadata,
+            out bool isAssignable)
+        {
+            isAssignable = false;
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess ||
+                !string.Equals(memberAccess.Name.Identifier.ValueText, "IsAssignableFrom", StringComparison.Ordinal) ||
+                invocation.ArgumentList.Arguments.Count != 1)
+            {
+                return false;
+            }
+
+            if (invocation.ArgumentList.Arguments[0].Expression is not IdentifierNameSyntax identifier ||
+                !string.Equals(identifier.Identifier.ValueText, parameterName, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (memberAccess.Expression is not TypeOfExpressionSyntax typeOfExpression)
+            {
+                return false;
+            }
+
+            var baseType = ResolveEffectiveTypeSymbol(semanticModel, invocation, semanticModel.GetTypeInfo(typeOfExpression.Type).Type);
+            if (baseType == null)
+            {
+                return false;
+            }
+
+            isAssignable = metadata.IsAssignableTo(baseType.OriginalDefinition.ToDisplayString());
+            return true;
+        }
+
+        private static bool IsConstructorInfoInvoke(IMethodSymbol? calledMethod)
+        {
+            if (calledMethod != null)
+            {
+                var containingType = calledMethod.ContainingType?.ToDisplayString() ?? "";
+                if (string.Equals(calledMethod.Name, "Invoke", StringComparison.Ordinal) &&
+                    (string.Equals(containingType, "System.Reflection.ConstructorInfo", StringComparison.Ordinal) ||
+                     string.Equals(containingType, "System.Reflection.MethodBase", StringComparison.Ordinal)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool LooksLikeConstructorInvokeSyntax(InvocationExpressionSyntax invocation)
+        {
+            return invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                   string.Equals(memberAccess.Name.Identifier.ValueText, "Invoke", StringComparison.Ordinal) &&
+                   memberAccess.Expression is IdentifierNameSyntax;
+        }
+
+        private static bool LooksLikeGetConstructorSyntax(InvocationExpressionSyntax invocation)
+        {
+            return invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                   string.Equals(memberAccess.Name.Identifier.ValueText, "GetConstructor", StringComparison.Ordinal);
+        }
+
+        private static bool LooksLikeActivatorCreateInstanceSyntax(InvocationExpressionSyntax invocation)
+        {
+            return invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                   memberAccess.Expression is IdentifierNameSyntax identifier &&
+                   string.Equals(identifier.Identifier.ValueText, "Activator", StringComparison.Ordinal) &&
+                   string.Equals(memberAccess.Name.Identifier.ValueText, "CreateInstance", StringComparison.Ordinal);
+        }
+
+        private static bool IsActivatorCreateInstance(IMethodSymbol? calledMethod)
+        {
+            return calledMethod != null &&
+                   string.Equals(calledMethod.Name, "CreateInstance", StringComparison.Ordinal) &&
+                   string.Equals(calledMethod.ContainingType?.ToDisplayString(), "System.Activator", StringComparison.Ordinal);
+        }
+
+        private static bool IsServiceResolutionMethod(IMethodSymbol? calledMethod, InvocationExpressionSyntax invocation, out string resolutionKind)
+        {
+            resolutionKind = string.Empty;
+            var methodName = calledMethod?.Name;
+            var containingType = calledMethod?.ContainingType?.ToDisplayString() ?? string.Empty;
+
+            if ((string.Equals(methodName, "GetRequiredService", StringComparison.Ordinal) ||
+                 string.Equals(methodName, "GetService", StringComparison.Ordinal)) &&
+                (containingType.StartsWith("Microsoft.Extensions.DependencyInjection.", StringComparison.Ordinal) ||
+                 string.Equals(containingType, "System.IServiceProvider", StringComparison.Ordinal)))
+            {
+                resolutionKind = "service_provider_dispatch";
+                return true;
+            }
+
+            if (string.Equals(methodName, "Resolve", StringComparison.Ordinal) &&
+                containingType.StartsWith("Autofac.", StringComparison.Ordinal))
+            {
+                resolutionKind = "autofac_resolve_dispatch";
+                return true;
+            }
+
+            if (calledMethod == null && invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+            {
+                var syntaxName = memberAccess.Name.Identifier.ValueText;
+                if (syntaxName is "GetRequiredService" or "GetService")
+                {
+                    resolutionKind = "service_provider_dispatch";
+                    return true;
+                }
+
+                if (string.Equals(syntaxName, "Resolve", StringComparison.Ordinal))
+                {
+                    resolutionKind = "autofac_resolve_dispatch";
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string? ResolveRequestedServiceType(
+            SemanticModel semanticModel,
+            InvocationExpressionSyntax invocation,
+            IMethodSymbol? calledMethod)
+        {
+            if (calledMethod is { IsGenericMethod: true } && calledMethod.TypeArguments.Length == 1)
+            {
+                return calledMethod.TypeArguments[0].OriginalDefinition.ToDisplayString();
+            }
+
+            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                memberAccess.Name is GenericNameSyntax genericName &&
+                genericName.TypeArgumentList.Arguments.Count == 1)
+            {
+                var requestedType = semanticModel.GetTypeInfo(genericName.TypeArgumentList.Arguments[0]).Type;
+                if (requestedType != null)
+                {
+                    return requestedType.OriginalDefinition.ToDisplayString();
+                }
+            }
+
+            if (invocation.Expression is GenericNameSyntax standaloneGenericName &&
+                standaloneGenericName.TypeArgumentList.Arguments.Count == 1)
+            {
+                var requestedType = semanticModel.GetTypeInfo(standaloneGenericName.TypeArgumentList.Arguments[0]).Type;
+                if (requestedType != null)
+                {
+                    return requestedType.OriginalDefinition.ToDisplayString();
+                }
+            }
+
+            if (invocation.ArgumentList.Arguments.Count == 0)
+            {
+                return null;
+            }
+
+            var firstArgument = UnwrapExpression(invocation.ArgumentList.Arguments[0].Expression);
+            if (firstArgument is TypeOfExpressionSyntax typeOfExpression)
+            {
+                var requestedType = semanticModel.GetTypeInfo(typeOfExpression.Type).Type;
+                return requestedType?.OriginalDefinition.ToDisplayString();
+            }
+
+            return null;
+        }
+
+        private static ExpressionSyntax UnwrapExpression(ExpressionSyntax expression)
+        {
+            while (expression is ParenthesizedExpressionSyntax parenthesized)
+            {
+                expression = parenthesized.Expression;
+            }
+
+            return expression;
         }
 
         private void ExtractDelegateReferences(SemanticModel semanticModel, SyntaxNode node, SymbolData symbolData, ExtractionResult result)
@@ -1011,36 +2524,75 @@ namespace Probe.Services.Analysis
             var methodLookup = new Dictionary<string, List<MethodLookupEntry>>(StringComparer.Ordinal);
             var autofacModuleTypes = new HashSet<string>(StringComparer.Ordinal);
             var autofacModuleLoadMethods = new HashSet<string>(StringComparer.Ordinal);
-            VisitNamespace(compilation.GlobalNamespace, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
-            return new CompilationAnalysisCache(dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+            var reflectionTypes = new Dictionary<string, ReflectionTypeMetadata>(StringComparer.Ordinal);
+            var serviceRegistrations = CloneRegistrationMap(_solutionServiceRegistrations);
+            VisitNamespace(compilation.GlobalNamespace, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
+            CollectServiceRegistrations(compilation, serviceRegistrations);
+            return new CompilationAnalysisCache(dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes, serviceRegistrations);
         }
 
-        private void VisitNamespace(INamespaceSymbol ns, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods)
+        private static Dictionary<string, HashSet<string>> CloneRegistrationMap(Dictionary<string, HashSet<string>> source)
+        {
+            return source.ToDictionary(
+                entry => entry.Key,
+                entry => new HashSet<string>(entry.Value, StringComparer.Ordinal),
+                StringComparer.Ordinal);
+        }
+
+        private void CollectServiceRegistrations(Compilation compilation, Dictionary<string, HashSet<string>> serviceRegistrations)
+        {
+            foreach (var syntaxTree in compilation.SyntaxTrees)
+            {
+                var semanticModel = compilation.GetSemanticModel(syntaxTree);
+                var root = syntaxTree.GetRoot();
+                foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                {
+                    if (TryExtractMicrosoftDiRegistration(semanticModel, invocation, out var serviceType, out var implementationType) &&
+                        !string.IsNullOrWhiteSpace(serviceType) &&
+                        !string.IsNullOrWhiteSpace(implementationType))
+                    {
+                        AddDispatchTarget(serviceRegistrations, serviceType, implementationType);
+                    }
+
+                    if (TryExtractAutofacRegistration(semanticModel, invocation, out serviceType, out implementationType) &&
+                        !string.IsNullOrWhiteSpace(serviceType) &&
+                        !string.IsNullOrWhiteSpace(implementationType))
+                    {
+                        AddDispatchTarget(serviceRegistrations, serviceType, implementationType);
+                    }
+                }
+            }
+        }
+
+        private void VisitNamespace(INamespaceSymbol ns, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
         {
             foreach (var member in ns.GetMembers())
             {
                 if (member is INamespaceSymbol childNs)
                 {
-                    VisitNamespace(childNs, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+                    VisitNamespace(childNs, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
                 }
                 else if (member is INamedTypeSymbol namedType)
                 {
-                    VisitType(namedType, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+                    VisitType(namedType, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
                 }
             }
         }
 
-        private void VisitType(INamedTypeSymbol type, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods)
+        private void VisitType(INamedTypeSymbol type, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
         {
             foreach (var nested in type.GetTypeMembers())
             {
-                VisitType(nested, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods);
+                VisitType(nested, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
             }
+
+            var typeFqn = type.OriginalDefinition.ToDisplayString();
+            reflectionTypes[typeFqn] = CreateReflectionTypeMetadata(type);
 
             var isAutofacModule = IsOrDerivedFrom(type, "Autofac.Module");
             if (isAutofacModule)
             {
-                autofacModuleTypes.Add(type.OriginalDefinition.ToDisplayString());
+                autofacModuleTypes.Add(typeFqn);
             }
 
             foreach (var method in type.GetMembers().OfType<IMethodSymbol>())
@@ -1091,6 +2643,246 @@ namespace Probe.Services.Analysis
                     AddDispatchTarget(dispatchMap, interfaceMethod.OriginalDefinition.ToDisplayString(), implementation.OriginalDefinition.ToDisplayString());
                 }
             }
+        }
+
+        private static ReflectionTypeMetadata CreateReflectionTypeMetadata(INamedTypeSymbol type)
+        {
+            var assignableTypes = new HashSet<string>(StringComparer.Ordinal)
+            {
+                type.OriginalDefinition.ToDisplayString()
+            };
+
+            var currentBase = type.BaseType;
+            while (currentBase != null)
+            {
+                assignableTypes.Add(currentBase.OriginalDefinition.ToDisplayString());
+                currentBase = currentBase.BaseType;
+            }
+
+            foreach (var iface in type.AllInterfaces)
+            {
+                assignableTypes.Add(iface.OriginalDefinition.ToDisplayString());
+            }
+
+            var constructors = type.InstanceConstructors
+                .Where(ctor => !ctor.IsStatic && (ctor.DeclaredAccessibility == Accessibility.Public || !ctor.IsImplicitlyDeclared))
+                .Select(ctor => new ReflectionConstructorMetadata(
+                    ctor.OriginalDefinition.ToDisplayString(),
+                    ctor.Parameters.Select(parameter => parameter.Type.OriginalDefinition.ToDisplayString()).ToArray(),
+                    ctor.DeclaredAccessibility == Accessibility.Public))
+                .ToList();
+
+            return new ReflectionTypeMetadata(
+                type.OriginalDefinition.ToDisplayString(),
+                type.Name,
+                type.IsAbstract,
+                type.TypeKind == TypeKind.Class,
+                type.TypeKind == TypeKind.Interface,
+                assignableTypes,
+                constructors);
+        }
+
+        private static bool TryExtractMicrosoftDiRegistration(
+            SemanticModel semanticModel,
+            InvocationExpressionSyntax invocation,
+            out string serviceType,
+            out string implementationType)
+        {
+            serviceType = string.Empty;
+            implementationType = string.Empty;
+
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess)
+            {
+                return false;
+            }
+
+            var methodName = memberAccess.Name.Identifier.ValueText;
+            if (methodName is not "AddSingleton" and not "AddScoped" and not "AddTransient")
+            {
+                return false;
+            }
+
+            if (memberAccess.Name is GenericNameSyntax genericName)
+            {
+                if (genericName.TypeArgumentList.Arguments.Count == 2)
+                {
+                    serviceType = ResolveTypeArgumentFqn(semanticModel, genericName.TypeArgumentList.Arguments[0]);
+                    implementationType = ResolveTypeArgumentFqn(semanticModel, genericName.TypeArgumentList.Arguments[1]);
+                    return !string.IsNullOrWhiteSpace(serviceType) && !string.IsNullOrWhiteSpace(implementationType);
+                }
+
+                if (genericName.TypeArgumentList.Arguments.Count == 1)
+                {
+                    serviceType = ResolveTypeArgumentFqn(semanticModel, genericName.TypeArgumentList.Arguments[0]);
+                    if (string.IsNullOrWhiteSpace(serviceType))
+                    {
+                        return false;
+                    }
+
+                    if (invocation.ArgumentList.Arguments.Count == 0)
+                    {
+                        implementationType = serviceType;
+                        return true;
+                    }
+
+                    if (TryResolveFactoryRegisteredImplementation(semanticModel, invocation.ArgumentList.Arguments[0].Expression, out implementationType))
+                    {
+                        return true;
+                    }
+
+                    return false;
+                }
+            }
+
+            if (invocation.ArgumentList.Arguments.Count != 1)
+            {
+                return false;
+            }
+
+            var registeredInstanceType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[0].Expression).Type;
+            if (registeredInstanceType == null)
+            {
+                return false;
+            }
+
+            // Existing instance registrations do not imply constructor dispatch at resolve time.
+            return false;
+        }
+
+        private static bool TryExtractAutofacRegistration(
+            SemanticModel semanticModel,
+            InvocationExpressionSyntax invocation,
+            out string serviceType,
+            out string implementationType)
+        {
+            serviceType = string.Empty;
+            implementationType = string.Empty;
+
+            var chain = FlattenInvocationChain(invocation);
+            if (chain.Count == 0 || chain[0].Expression is not MemberAccessExpressionSyntax rootMemberAccess)
+            {
+                return false;
+            }
+
+            var rootMethodName = rootMemberAccess.Name.Identifier.ValueText;
+            if (rootMethodName == "RegisterType" && rootMemberAccess.Name is GenericNameSyntax registerTypeName)
+            {
+                if (registerTypeName.TypeArgumentList.Arguments.Count != 1)
+                {
+                    return false;
+                }
+
+                implementationType = ResolveTypeArgumentFqn(semanticModel, registerTypeName.TypeArgumentList.Arguments[0]);
+                if (string.IsNullOrWhiteSpace(implementationType))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                return false;
+            }
+
+            var serviceTypes = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var link in chain.Skip(1))
+            {
+                if (link.Expression is not MemberAccessExpressionSyntax linkMemberAccess)
+                {
+                    continue;
+                }
+
+                var linkName = linkMemberAccess.Name.Identifier.ValueText;
+                if (linkName == "As" && linkMemberAccess.Name is GenericNameSyntax asGenericName)
+                {
+                    foreach (var typeArgument in asGenericName.TypeArgumentList.Arguments)
+                    {
+                        var asType = ResolveTypeArgumentFqn(semanticModel, typeArgument);
+                        if (!string.IsNullOrWhiteSpace(asType))
+                        {
+                            serviceTypes.Add(asType);
+                        }
+                    }
+                }
+                else if (linkName == "AsSelf")
+                {
+                    serviceTypes.Add(implementationType);
+                }
+            }
+
+            if (serviceTypes.Count == 0)
+            {
+                serviceType = implementationType;
+                return true;
+            }
+
+            serviceType = serviceTypes.First();
+            return true;
+        }
+
+        private static List<InvocationExpressionSyntax> FlattenInvocationChain(InvocationExpressionSyntax invocation)
+        {
+            var chain = new List<InvocationExpressionSyntax>();
+            for (InvocationExpressionSyntax? current = invocation; current != null;)
+            {
+                chain.Add(current);
+                if (current.Expression is MemberAccessExpressionSyntax memberAccess &&
+                    memberAccess.Expression is InvocationExpressionSyntax innerInvocation)
+                {
+                    current = innerInvocation;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            chain.Reverse();
+            return chain;
+        }
+
+        private static string ResolveTypeArgumentFqn(SemanticModel semanticModel, TypeSyntax typeSyntax)
+        {
+            return semanticModel.GetTypeInfo(typeSyntax).Type?.OriginalDefinition.ToDisplayString() ?? string.Empty;
+        }
+
+        private static bool TryResolveFactoryRegisteredImplementation(
+            SemanticModel semanticModel,
+            ExpressionSyntax expression,
+            out string implementationType)
+        {
+            implementationType = string.Empty;
+            var lambda = ExtractLambda(expression);
+            if (lambda == null)
+            {
+                return false;
+            }
+
+            ExpressionSyntax? bodyExpression = lambda.Body switch
+            {
+                ExpressionSyntax directExpression => directExpression,
+                BlockSyntax block => block.DescendantNodes().OfType<ReturnStatementSyntax>().FirstOrDefault()?.Expression,
+                _ => null
+            };
+
+            if (bodyExpression == null)
+            {
+                return false;
+            }
+
+            bodyExpression = UnwrapExpression(bodyExpression);
+            if (bodyExpression is InvocationExpressionSyntax invocation)
+            {
+                implementationType = ResolveRequestedServiceType(semanticModel, invocation, ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation))) ?? string.Empty;
+                return !string.IsNullOrWhiteSpace(implementationType);
+            }
+
+            if (bodyExpression is ObjectCreationExpressionSyntax objectCreation)
+            {
+                implementationType = semanticModel.GetTypeInfo(objectCreation).Type?.OriginalDefinition.ToDisplayString() ?? string.Empty;
+                return !string.IsNullOrWhiteSpace(implementationType);
+            }
+
+            return false;
         }
 
         private static void AddDispatchTarget(Dictionary<string, HashSet<string>> dispatchMap, string contractFqn, string implementationFqn)
@@ -1267,12 +3059,16 @@ namespace Probe.Services.Analysis
         private readonly HashSet<string> _knownMethods;
         private readonly HashSet<string> _autofacModuleTypes;
         private readonly HashSet<string> _autofacModuleLoadMethods;
+        private readonly Dictionary<string, ReflectionTypeMetadata> _reflectionTypes;
+        private readonly Dictionary<string, HashSet<string>> _serviceRegistrations;
 
         public CompilationAnalysisCache(
             Dictionary<string, HashSet<string>> dispatchMap,
             Dictionary<string, List<MethodLookupEntry>> methodLookup,
             HashSet<string> autofacModuleTypes,
-            HashSet<string> autofacModuleLoadMethods)
+            HashSet<string> autofacModuleLoadMethods,
+            Dictionary<string, ReflectionTypeMetadata> reflectionTypes,
+            Dictionary<string, HashSet<string>> serviceRegistrations)
         {
             _dispatchMap = dispatchMap;
             _methodLookup = methodLookup;
@@ -1282,6 +3078,8 @@ namespace Probe.Services.Analysis
                 .ToHashSet(StringComparer.Ordinal);
             _autofacModuleTypes = autofacModuleTypes;
             _autofacModuleLoadMethods = autofacModuleLoadMethods;
+            _reflectionTypes = reflectionTypes;
+            _serviceRegistrations = serviceRegistrations;
         }
 
         public IEnumerable<string> GetDispatchTargets(IMethodSymbol calledMethod)
@@ -1327,6 +3125,103 @@ namespace Probe.Services.Analysis
         {
             return _autofacModuleLoadMethods;
         }
+
+        public HashSet<string> GetAllTypeFqns()
+        {
+            return _reflectionTypes.Keys.ToHashSet(StringComparer.Ordinal);
+        }
+
+        public HashSet<string> GetConcreteTypesAssignableTo(string baseTypeFqn)
+        {
+            return _reflectionTypes.Values
+                .Where(type => !type.IsAbstract && !type.IsInterface && type.IsAssignableTo(baseTypeFqn))
+                .Select(type => type.Fqn)
+                .ToHashSet(StringComparer.Ordinal);
+        }
+
+        public bool TryGetTypeMetadata(string fqn, out ReflectionTypeMetadata metadata)
+        {
+            return _reflectionTypes.TryGetValue(fqn, out metadata!);
+        }
+
+        public IEnumerable<string> ResolveServiceDispatchConstructors(string requestedTypeFqn)
+        {
+            List<string> candidateTypes;
+            if (_serviceRegistrations.TryGetValue(requestedTypeFqn, out var registeredImplementations))
+            {
+                candidateTypes = registeredImplementations
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+            }
+            else
+            {
+                candidateTypes = new List<string>();
+                if (_reflectionTypes.TryGetValue(requestedTypeFqn, out var requestedTypeMetadata) &&
+                    !requestedTypeMetadata.IsAbstract &&
+                    !requestedTypeMetadata.IsInterface)
+                {
+                    candidateTypes.Add(requestedTypeFqn);
+                }
+            }
+
+            candidateTypes = candidateTypes
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (candidateTypes.Count != 1)
+            {
+                yield break;
+            }
+
+            if (!_reflectionTypes.TryGetValue(candidateTypes[0], out var resolvedType))
+            {
+                yield break;
+            }
+
+            var publicConstructors = resolvedType.Constructors
+                .Where(constructor => constructor.IsPublic)
+                .ToList();
+            if (publicConstructors.Count != 1)
+            {
+                yield break;
+            }
+
+            yield return publicConstructors[0].Fqn;
+        }
+
+        public IEnumerable<string> GetConstructorCandidates(IEnumerable<string> candidateTypeFqns, IReadOnlyList<string> parameterTypes)
+        {
+            foreach (var typeFqn in candidateTypeFqns)
+            {
+                if (!_reflectionTypes.TryGetValue(typeFqn, out var metadata))
+                {
+                    continue;
+                }
+
+                foreach (var constructor in metadata.Constructors)
+                {
+                    if (constructor.ParameterTypes.Count != parameterTypes.Count)
+                    {
+                        continue;
+                    }
+
+                    var exactMatch = true;
+                    for (var i = 0; i < parameterTypes.Count; i++)
+                    {
+                        if (!string.Equals(constructor.ParameterTypes[i], parameterTypes[i], StringComparison.Ordinal))
+                        {
+                            exactMatch = false;
+                            break;
+                        }
+                    }
+
+                    if (exactMatch)
+                    {
+                        yield return constructor.Fqn;
+                    }
+                }
+            }
+        }
     }
 
     internal sealed class MethodLookupEntry
@@ -1334,4 +3229,31 @@ namespace Probe.Services.Analysis
         public string Fqn { get; set; } = "";
         public int ParameterCount { get; set; }
     }
+
+    internal sealed record ReflectionTypeMetadata(
+        string Fqn,
+        string Name,
+        bool IsAbstract,
+        bool IsClass,
+        bool IsInterface,
+        IReadOnlySet<string> AssignableTypeFqns,
+        IReadOnlyList<ReflectionConstructorMetadata> Constructors)
+    {
+        public bool IsAssignableTo(string baseTypeFqn)
+        {
+            return AssignableTypeFqns.Contains(baseTypeFqn);
+        }
+    }
+
+    internal sealed record ReflectionConstructorMetadata(
+        string Fqn,
+        IReadOnlyList<string> ParameterTypes,
+        bool IsPublic);
+
+    internal sealed record FrameworkEntrypoint(
+        string FrameworkCallerFqn,
+        string FrameworkCallerName,
+        string FrameworkNamespace,
+        string FrameworkContainingType,
+        string CallType);
 }

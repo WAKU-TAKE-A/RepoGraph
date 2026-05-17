@@ -22,17 +22,17 @@ namespace Probe.Services.Graph
             Directory.CreateDirectory(_outputDir);
         }
 
-        public async Task ExportGraphsAsync(string runId)
+        public async Task ExportGraphsAsync(string runId, string scanMode = "full", string? solutionPath = null)
         {
             _logger.LogInformation("Exporting graphs for run {RunId}...", runId);
-            await ExportDependencyGraphAsync(runId);
-            await ExportInheritanceGraphAsync(runId);
-            await ExportCallGraphAsync(runId);
-            await ExportFieldAccessGraphAsync(runId);
-            await ExportTypeDependencyGraphAsync(runId);
+            await ExportDependencyGraphAsync(runId, scanMode, solutionPath);
+            await ExportInheritanceGraphAsync(runId, scanMode, solutionPath);
+            await ExportCallGraphAsync(runId, scanMode, solutionPath);
+            await ExportFieldAccessGraphAsync(runId, scanMode, solutionPath);
+            await ExportTypeDependencyGraphAsync(runId, scanMode, solutionPath);
         }
 
-        private async Task ExportTypeDependencyGraphAsync(string runId)
+        private async Task ExportTypeDependencyGraphAsync(string runId, string scanMode, string? solutionPath)
         {
             var nodes = new List<object>();
             var links = new List<object>();
@@ -76,10 +76,10 @@ LEFT JOIN projects p ON p.id = s.project_id";
                 }
             }
 
-            await WriteJsonAsync("type_dependency_graph.json", "type_dependency", runId, nodes, links);
+            await WriteJsonAsync("type_dependency_graph.json", "type_dependency", runId, nodes, links, scanMode, solutionPath);
         }
 
-        private async Task ExportDependencyGraphAsync(string runId)
+        private async Task ExportDependencyGraphAsync(string runId, string scanMode, string? solutionPath)
         {
             var nodes = new List<object>();
             var links = new List<object>();
@@ -131,10 +131,10 @@ LEFT JOIN projects p ON p.id = s.project_id";
                 }
             }
 
-            await WriteJsonAsync("dependency_graph.json", "dependency", runId, nodes, links);
+            await WriteJsonAsync("dependency_graph.json", "dependency", runId, nodes, links, scanMode, solutionPath);
         }
 
-        private async Task ExportInheritanceGraphAsync(string runId)
+        private async Task ExportInheritanceGraphAsync(string runId, string scanMode, string? solutionPath)
         {
             var nodes = new List<object>();
             var links = new List<object>();
@@ -181,13 +181,13 @@ LEFT JOIN projects p ON p.id = s.project_id";
                 }
             }
 
-            await WriteJsonAsync("inheritance_graph.json", "inheritance", runId, nodes, links);
+            await WriteJsonAsync("inheritance_graph.json", "inheritance", runId, nodes, links, scanMode, solutionPath);
         }
 
         /// <summary>
         /// Export call graph with thread boundary metadata on nodes.
         /// </summary>
-        private async Task ExportCallGraphAsync(string runId)
+        private async Task ExportCallGraphAsync(string runId, string scanMode, string? solutionPath)
         {
             var nodes = new List<object>();
             var links = new List<object>();
@@ -205,7 +205,7 @@ SELECT s.id, s.fqn, s.kind,
 FROM symbols s
 LEFT JOIN documents d ON d.id = s.document_id
 LEFT JOIN projects p ON p.id = s.project_id
-WHERE s.kind IN ('method', 'constructor', 'event', 'lambda', 'xaml')";
+WHERE s.kind IN ('method', 'constructor', 'event', 'lambda', 'xaml', 'framework_method')";
             using var readerNodes = await cmdNodes.ExecuteReaderAsync();
             var symbolIdToFqn = new Dictionary<string, string>();
             while (await readerNodes.ReadAsync())
@@ -261,13 +261,13 @@ WHERE s.kind IN ('method', 'constructor', 'event', 'lambda', 'xaml')";
                 }
             }
 
-            await WriteJsonAsync("call_graph.json", "call", runId, nodes, links);
+            await WriteJsonAsync("call_graph.json", "call", runId, nodes, links, scanMode, solutionPath);
         }
 
         /// <summary>
         /// Export field access graph showing which methods read/write which fields.
         /// </summary>
-        private async Task ExportFieldAccessGraphAsync(string runId)
+        private async Task ExportFieldAccessGraphAsync(string runId, string scanMode, string? solutionPath)
         {
             var nodes = new HashSet<string>();
             var nodeList = new List<object>();
@@ -324,11 +324,11 @@ WHERE s.kind IN ('method', 'constructor', 'event', 'lambda', 'xaml')";
                 }
             }
 
-            await WriteJsonAsync("field_access_graph.json", "field_access", runId, nodeList, links);
+            await WriteJsonAsync("field_access_graph.json", "field_access", runId, nodeList, links, scanMode, solutionPath);
             _logger.LogInformation("Field access graph: {NodeCount} nodes, {LinkCount} links", nodeList.Count, links.Count);
         }
 
-        private async Task WriteJsonAsync(string filename, string graphType, string runId, object nodes, object links)
+        private async Task WriteJsonAsync(string filename, string graphType, string runId, object nodes, object links, string scanMode, string? solutionPath)
         {
             var graphObj = new
             {
@@ -338,7 +338,9 @@ WHERE s.kind IN ('method', 'constructor', 'event', 'lambda', 'xaml')";
                 {
                     type = graphType,
                     generated_at = DateTime.UtcNow.ToString("O"),
-                    analysis_run_id = runId
+                    analysis_run_id = runId,
+                    scan_mode = scanMode,
+                    solution_path = solutionPath ?? ""
                 },
                 nodes = nodes,
                 links = links

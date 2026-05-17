@@ -92,12 +92,34 @@ namespace Probe
                 var allFieldAccesses = new List<FieldAccessData>();
                 var allTypeDependencies = new List<TypeDependencyData>();
                 var methodIndex = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                var bindingMemberIndex = new Dictionary<string, List<SymbolData>>(StringComparer.Ordinal);
+                var solutionServiceRegistrations = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
 
                 foreach (var project in includedProjects)
                 {
                     var projectKey = Path.GetFullPath(project.FilePath ?? project.Name);
                     stableProjectIds[project.Id] = GetStableId(projectKey);
                 }
+
+                foreach (var project in includedProjects)
+                {
+                    try
+                    {
+                        var registrationCompilation = await project.GetCompilationAsync();
+                        if (registrationCompilation == null)
+                        {
+                            continue;
+                        }
+
+                        MergeServiceRegistrations(solutionServiceRegistrations, extractor.CollectServiceRegistrations(registrationCompilation));
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Failed to collect service registrations for project {Project}", project.Name);
+                    }
+                }
+
+                extractor.SetSolutionServiceRegistrations(solutionServiceRegistrations);
 
                 foreach (var project in includedProjects)
                 {
@@ -195,6 +217,7 @@ namespace Probe
                                 {
                                     await persistence.SaveSymbolsAsync(result.Symbols);
                                     IndexMethods(methodIndex, result.Symbols);
+                                    IndexBindingMembers(bindingMemberIndex, result.Symbols);
                                 }
 
                                 if (result.MethodCalls.Any())
@@ -226,7 +249,7 @@ namespace Probe
                         var xamlPaths = FindProjectXamlFiles(project.FilePath ?? project.Name, filterService);
                         if (xamlPaths.Count > 0)
                         {
-                            var xamlResult = xamlExtractor.Extract(project.Name, projectId, project.FilePath ?? project.Name, xamlPaths, methodIndex);
+                            var xamlResult = xamlExtractor.Extract(project.Name, projectId, project.FilePath ?? project.Name, xamlPaths, methodIndex, bindingMemberIndex);
 
                             foreach (var xamlDocument in xamlResult.Documents)
                             {
@@ -302,7 +325,7 @@ namespace Probe
                 logger.LogInformation("Generating graphs...");
                 var graphOutputDir = Path.Combine(output, "output", "graphs");
                 var graphService = new GraphService(dbPath, graphOutputDir, serviceProvider.GetRequiredService<ILogger<GraphService>>());
-                await graphService.ExportGraphsAsync(runId);
+                await graphService.ExportGraphsAsync(runId, mode, path);
 
                 await persistence.UpdateAnalysisRunStatusAsync(runId, "completed");
                 logger.LogInformation("Analysis completed.");
@@ -340,6 +363,53 @@ namespace Probe
                 if (!methods.Contains(symbol.Fqn, StringComparer.Ordinal))
                 {
                     methods.Add(symbol.Fqn);
+                }
+            }
+        }
+
+        private static void MergeServiceRegistrations(
+            Dictionary<string, HashSet<string>> target,
+            Dictionary<string, HashSet<string>> source)
+        {
+            foreach (var entry in source)
+            {
+                if (!target.TryGetValue(entry.Key, out var implementations))
+                {
+                    implementations = new HashSet<string>(StringComparer.Ordinal);
+                    target[entry.Key] = implementations;
+                }
+
+                foreach (var implementation in entry.Value)
+                {
+                    implementations.Add(implementation);
+                }
+            }
+        }
+
+        private static void IndexBindingMembers(Dictionary<string, List<SymbolData>> memberIndex, IEnumerable<SymbolData> symbols)
+        {
+            foreach (var symbol in symbols)
+            {
+                if (string.IsNullOrWhiteSpace(symbol.ContainingType))
+                {
+                    continue;
+                }
+
+                if (symbol.Kind is not ("method" or "property" or "field"))
+                {
+                    continue;
+                }
+
+                var key = $"{symbol.ContainingType}|{symbol.Name}";
+                if (!memberIndex.TryGetValue(key, out var members))
+                {
+                    members = new List<SymbolData>();
+                    memberIndex[key] = members;
+                }
+
+                if (!members.Any(existing => string.Equals(existing.Fqn, symbol.Fqn, StringComparison.Ordinal)))
+                {
+                    members.Add(symbol);
                 }
             }
         }

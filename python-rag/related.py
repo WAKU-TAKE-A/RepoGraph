@@ -106,6 +106,24 @@ class RelatedFinder:
                 score += 0.1
                 reasons.append("same namespace")
 
+            if source_symbol.project_id and candidate.project_id == source_symbol.project_id:
+                score += 0.08
+                reasons.append("same project")
+
+            if source_symbol.document and candidate.document:
+                source_file = source_symbol.document.file_name or ""
+                candidate_file = candidate.document.file_name or ""
+                if source_file and candidate_file and source_file == candidate_file:
+                    score += 0.08
+                    reasons.append("same file")
+                elif source_file and candidate_file:
+                    source_stem = source_file.rsplit(".", 1)[0]
+                    candidate_stem = candidate_file.rsplit(".", 1)[0]
+                    file_shape = SequenceMatcher(None, source_stem.lower(), candidate_stem.lower()).ratio()
+                    if file_shape >= 0.65:
+                        score += file_shape * 0.05
+                        reasons.append(f"file family {file_shape:.2f}")
+
             if source_symbol.return_type and candidate.return_type == source_symbol.return_type:
                 score += 0.05
                 reasons.append("same return type")

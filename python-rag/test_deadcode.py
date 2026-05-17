@@ -574,11 +574,15 @@ class DeadCodeDetectorTests(unittest.TestCase):
         json_report = (self.workspace / "output" / "reports" / "dead_code_candidates.json").read_text(encoding="utf-8")
 
         self.assertIn("## Investigation Categories", report)
+        self.assertIn("| Family | Count |", report)
         self.assertIn("| Rank | Category | Related | LOC | Kind | Why It Looks Isolated | Symbol (FQN) | File |", report)
         self.assertIn("## Why These Candidates Surfaced", report)
+        self.assertIn("explanation facts", report)
         self.assertIn("no callers", report)
         self.assertIn("\"why\":", json_report)
         self.assertIn("\"signals\":", json_report)
+        self.assertIn("\"explanation_facts\":", json_report)
+        self.assertIn("\"suppressed_by_family\":", json_report)
 
 
 if __name__ == "__main__":

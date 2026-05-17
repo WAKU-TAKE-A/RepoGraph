@@ -4,6 +4,30 @@ import json
 import os
 from loguru import logger
 
+LOW_CONFIDENCE_CALL_TYPES = {
+    "delegate_reference",
+}
+
+FRAMEWORK_CONVENTION_CALL_TYPES = {
+    "event_dispatch",
+    "lifecycle_entrypoint",
+    "serialization_callback",
+    "mvvm_toolkit_message_dispatch",
+    "autofac_module_load",
+    "autofac_reflection_registration",
+    "service_provider_dispatch",
+    "autofac_resolve_dispatch",
+    "reflection_constructor_dispatch",
+    "xaml_event",
+}
+
+FRAMEWORK_CONVENTION_DEPENDENCY_TYPES = {
+    "xaml_command_binding",
+    "xaml_navigation",
+    "xaml_type_usage",
+    "xaml_codebehind",
+}
+
 class GraphLoader:
     def __init__(self, graphs_dir: str):
         self.graphs_dir = graphs_dir
@@ -53,3 +77,75 @@ class GraphLoader:
                 return candidate
 
         return None
+
+    def get_node_kind(self, graph_name: str, node_id: str) -> str:
+        graph = getattr(self, graph_name, None)
+        if graph is None or node_id not in graph:
+            return ""
+        return str(graph.nodes[node_id].get("kind", ""))
+
+    def is_framework_like_call_node(self, node_id: str) -> bool:
+        if node_id.startswith("framework::"):
+            return True
+        kind = self.get_node_kind("call_graph", node_id)
+        return kind in {"framework_method", "xaml"}
+
+    def inbound_edge_type_counts(self, graph_name: str, node_id: str) -> dict[str, int]:
+        graph = getattr(self, graph_name, None)
+        if graph is None or node_id not in graph:
+            return {}
+
+        counts: dict[str, int] = {}
+        for source, _, data in graph.in_edges(node_id, data=True):
+            edge_type = str(data.get("type", "unknown"))
+            if graph_name == "call_graph" and self.is_framework_like_call_node(source):
+                edge_type = f"{edge_type}:framework_source"
+            counts[edge_type] = counts.get(edge_type, 0) + 1
+        return counts
+
+    def outbound_edge_type_counts(self, graph_name: str, node_id: str) -> dict[str, int]:
+        graph = getattr(self, graph_name, None)
+        if graph is None or node_id not in graph:
+            return {}
+
+        counts: dict[str, int] = {}
+        for _, target, data in graph.out_edges(node_id, data=True):
+            edge_type = str(data.get("type", "unknown"))
+            if graph_name == "call_graph" and self.is_framework_like_call_node(target):
+                edge_type = f"{edge_type}:framework_target"
+            counts[edge_type] = counts.get(edge_type, 0) + 1
+        return counts
+
+    def weighted_call_degree(self, node_id: str, direction: str) -> tuple[float, dict[str, int]]:
+        if node_id not in self.call_graph:
+            return 0.0, {}
+
+        if direction == "in":
+            edges = self.call_graph.in_edges(node_id, data=True)
+            endpoint_index = 0
+        else:
+            edges = self.call_graph.out_edges(node_id, data=True)
+            endpoint_index = 1
+
+        weighted = 0.0
+        counts: dict[str, int] = {}
+        for source, target, data in edges:
+            edge_type = str(data.get("type", "calls"))
+            neighbor = source if endpoint_index == 0 else target
+            is_framework_neighbor = self.is_framework_like_call_node(neighbor)
+
+            if edge_type in LOW_CONFIDENCE_CALL_TYPES:
+                weight = 0.15
+            elif edge_type in FRAMEWORK_CONVENTION_CALL_TYPES or is_framework_neighbor:
+                weight = 0.35
+            else:
+                weight = 1.0
+
+            weighted += weight
+            counted_type = edge_type
+            if is_framework_neighbor:
+                suffix = "framework_source" if endpoint_index == 0 else "framework_target"
+                counted_type = f"{counted_type}:{suffix}"
+            counts[counted_type] = counts.get(counted_type, 0) + 1
+
+        return weighted, counts

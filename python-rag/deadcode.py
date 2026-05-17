@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from sqlalchemy.orm import Session
 from models import Project, Symbol
 from graph import GraphLoader
@@ -19,6 +19,7 @@ class DeadCodeDetector:
         }
         self._symbols_by_containing_type: Dict[str, List[Symbol]] = {}
         self._suppressed_by_rule: Dict[str, int] = {}
+        self._suppressed_by_family: Dict[str, int] = {}
         for symbol in self.session.query(Symbol).all():
             if symbol.containing_type:
                 self._symbols_by_containing_type.setdefault(symbol.containing_type, []).append(symbol)
@@ -26,6 +27,7 @@ class DeadCodeDetector:
     def detect_dead_code_candidates(self) -> List[Dict]:
         candidates = []
         self._suppressed_by_rule = {}
+        self._suppressed_by_family = {}
         # fan_in == 0 のシンボルを取得（明示的なメソッド呼び出しがないもの）
         symbols = self.session.query(Symbol).filter(Symbol.fan_in == 0).all()
         
@@ -99,6 +101,7 @@ class DeadCodeDetector:
                 "loc": sym.loc if sym.loc else 0,
                 "file": file_name,
                 "signals": self._collect_isolation_signals(sym),
+                "explanation_facts": [],
                 "why": "",
                 "related": [],
                 "category": "isolated",
@@ -130,6 +133,12 @@ class DeadCodeDetector:
                 f.write("## Suppressed Convention Patterns\n\n")
                 f.write("> These symbols were not listed as dead-code candidates because they match known framework or language conventions.\n")
                 f.write("> Rule IDs are intentionally explicit so reviewers can see whether a suppression came from .NET hosting, XAML UI, MVVM, ASP.NET, DI, or serialization.\n\n")
+                if self._suppressed_by_family:
+                    f.write("| Family | Count |\n")
+                    f.write("|--------|-------|\n")
+                    for family, count in sorted(self._suppressed_by_family.items()):
+                        f.write(f"| `{family}` | {count} |\n")
+                    f.write("\n")
                 f.write("| Rule | Count |\n")
                 f.write("|------|-------|\n")
                 for rule_id, count in sorted(self._suppressed_by_rule.items()):
@@ -154,6 +163,11 @@ class DeadCodeDetector:
                     signal_summary = self._format_signal_summary(candidate["signals"])
                     if signal_summary:
                         f.write(f"- structural signals: {signal_summary}\n")
+                    explanation_facts = candidate.get("explanation_facts", [])
+                    if explanation_facts:
+                        f.write("- explanation facts:\n")
+                        for fact in explanation_facts[:6]:
+                            f.write(f"  - {fact}\n")
                     if candidate["related"]:
                         f.write("- nearby symbols:\n")
                         for related in candidate["related"]:
@@ -186,6 +200,7 @@ class DeadCodeDetector:
             json.dump({
                 "candidates": candidates,
                 "suppressed_by_rule": self._suppressed_by_rule,
+                "suppressed_by_family": self._suppressed_by_family,
             }, f, indent=2, ensure_ascii=False)
                 
         logger.info(f"Generated dead code report with {len(candidates)} candidates at {report_path}")
@@ -200,7 +215,9 @@ class DeadCodeDetector:
 
     def _attach_explanations(self, candidates: List[Dict]) -> None:
         for candidate in candidates:
-            candidate["why"] = self._build_candidate_explanation(candidate)
+            explanation = self._build_candidate_explanation(candidate)
+            candidate["why"] = explanation["summary"]
+            candidate["explanation_facts"] = explanation["facts"]
 
     @staticmethod
     def _categorize_candidates(candidates: List[Dict]) -> None:
@@ -268,6 +285,8 @@ class DeadCodeDetector:
             "callees": self._graph_successor_count("call_graph", fqn),
             "used_types": self._graph_successor_count("type_dependency_graph", fqn),
             "used_fields": self._graph_successor_count("field_access_graph", fqn),
+            "inbound_call_types": self.graph.inbound_edge_type_counts("call_graph", fqn),
+            "outbound_call_types": self.graph.outbound_edge_type_counts("call_graph", fqn),
         }
 
         if sym.containing_type:
@@ -275,31 +294,50 @@ class DeadCodeDetector:
 
         return signals
 
-    def _build_candidate_explanation(self, candidate: Dict) -> str:
+    def _build_candidate_explanation(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         signals = candidate["signals"]
         missing = []
+        facts = []
         if signals.get("callers", 0) == 0:
             missing.append("no callers")
+            facts.append("call graph has no inbound callers")
         if signals.get("type_users", 0) == 0:
             missing.append("no type users")
+            facts.append("type dependency graph has no inbound type users")
         if signals.get("field_users", 0) == 0 and candidate["kind"] in {"field", "property"}:
             missing.append("no field readers/writers")
+            facts.append("field access graph shows no inbound readers or writers")
         if candidate["kind"] in {"class", "interface"} and signals.get("derived_types", 0) == 0:
             missing.append("no derived types")
+            facts.append("inheritance graph has no derived types")
         if candidate["kind"] == "constructor" and signals.get("containing_type_users", 0) == 0:
             missing.append("owning type has no detected type users")
+            facts.append("constructor's owning type has no inbound type users")
+        if signals.get("callees", 0) > 0:
+            facts.append(f"symbol still calls {signals['callees']} downstream method(s)")
+        if signals.get("used_types", 0) > 0:
+            facts.append(f"symbol still depends on {signals['used_types']} downstream type(s)")
+        inbound_call_types = signals.get("inbound_call_types", {})
+        if inbound_call_types:
+            facts.append(f"inbound call edge types: {self._format_edge_type_counts(inbound_call_types)}")
+        outbound_call_types = signals.get("outbound_call_types", {})
+        if outbound_call_types:
+            facts.append(f"outbound call edge types: {self._format_edge_type_counts(outbound_call_types)}")
 
         if not missing:
             missing.append("no inbound structural references")
+            facts.append("all checked structural graphs lacked inbound references")
 
         if candidate["related"]:
             strongest = candidate["related"][0]
             reason_text = ", ".join(strongest.get("reasons", [])[:2])
             if reason_text:
-                return f"{'; '.join(missing)}; nearest sibling looks like {reason_text}"
-            return f"{'; '.join(missing)}; has nearby structural sibling"
+                facts.append(f"nearest related symbol suggests family resemblance: {reason_text}")
+                return {"summary": f"{'; '.join(missing)}; nearest sibling looks like {reason_text}", "facts": facts}
+            facts.append("related-symbol search found a nearby structural sibling")
+            return {"summary": f"{'; '.join(missing)}; has nearby structural sibling", "facts": facts}
 
-        return "; ".join(missing)
+        return {"summary": "; ".join(missing), "facts": facts}
 
     @staticmethod
     def _format_signal_summary(signals: Dict[str, int]) -> str:
@@ -317,6 +355,14 @@ class DeadCodeDetector:
 
     def _record_suppression(self, rule_id: str) -> None:
         self._suppressed_by_rule[rule_id] = self._suppressed_by_rule.get(rule_id, 0) + 1
+        family = self._rule_family(rule_id)
+        self._suppressed_by_family[family] = self._suppressed_by_family.get(family, 0) + 1
+
+    @staticmethod
+    def _rule_family(rule_id: str) -> str:
+        if "." not in rule_id:
+            return rule_id
+        return rule_id.split(".", 1)[0]
 
     def _get_convention_suppression(self, sym: Symbol, file_path: str) -> Optional[str]:
         if sym.kind in {"xaml", "lambda", "framework_method"}:
@@ -541,7 +587,7 @@ class DeadCodeDetector:
     def _looks_like_ui_type_name(name: str) -> bool:
         ui_suffixes = (
             "Form", "Control", "Dialog", "Window", "Page",
-            "View", "Panel", "Editor"
+            "View", "Panel"
         )
         short_name = name.split(".")[-1] if name else ""
         return bool(short_name) and (
@@ -722,3 +768,8 @@ class DeadCodeDetector:
             return sum(1 for _ in graph.successors(fqn))
         except Exception:
             return 0
+
+    @staticmethod
+    def _format_edge_type_counts(counts: Dict[str, int]) -> str:
+        parts = [f"{edge_type}={count}" for edge_type, count in sorted(counts.items())]
+        return ", ".join(parts)

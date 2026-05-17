@@ -66,6 +66,8 @@ class HotspotScorer:
         for symbol in symbols:
             fan_in = self.graph.call_graph.in_degree(symbol.fqn) if symbol.fqn in self.graph.call_graph else 0
             fan_out = self.graph.call_graph.out_degree(symbol.fqn) if symbol.fqn in self.graph.call_graph else 0
+            weighted_fan_in, inbound_call_types = self.graph.weighted_call_degree(symbol.fqn, "in")
+            weighted_fan_out, outbound_call_types = self.graph.weighted_call_degree(symbol.fqn, "out")
             project_name = self._project_name_by_id.get(symbol.project_id, "")
             static_coupling = self.graph.dependency_graph.degree(project_name) if project_name and project_name in self.graph.dependency_graph else 0
             
@@ -73,6 +75,10 @@ class HotspotScorer:
                 "symbol": symbol,
                 "fan_in": fan_in,
                 "fan_out": fan_out,
+                "weighted_fan_in": weighted_fan_in,
+                "weighted_fan_out": weighted_fan_out,
+                "inbound_call_types": inbound_call_types,
+                "outbound_call_types": outbound_call_types,
                 "static_coupling": static_coupling,
                 "project_name": project_name,
                 "is_test_project": self._is_test_symbol(symbol),
@@ -97,6 +103,8 @@ class HotspotScorer:
             m = {
                 "fan_in": item["fan_in"],
                 "fan_out": item["fan_out"],
+                "effective_fan_in": round(item["weighted_fan_in"], 3),
+                "effective_fan_out": round(item["weighted_fan_out"], 3),
                 "loc": s.loc or 0,
                 "parameter_count": s.parameter_count or 0,
                 "async_flag": 1 if s.is_async else 0,
@@ -119,6 +127,8 @@ class HotspotScorer:
                 "has_blocking_wait": bool(s.has_blocking_wait),
                 "project_name": item["project_name"],
                 "is_test_project": item["is_test_project"],
+                "inbound_call_types": item["inbound_call_types"],
+                "outbound_call_types": item["outbound_call_types"],
             })
             
         if not raw_metrics:
@@ -128,8 +138,8 @@ class HotspotScorer:
         def get_max(key):
             return max(r["metrics"][key] for r in raw_metrics) or 1.0 # avoid div by zero
 
-        max_fan_in = get_max("fan_in")
-        max_fan_out = get_max("fan_out")
+        max_fan_in = get_max("effective_fan_in")
+        max_fan_out = get_max("effective_fan_out")
         max_loc = get_max("loc")
         max_params = get_max("parameter_count")
         max_static = get_max("static_coupling")
@@ -139,8 +149,8 @@ class HotspotScorer:
         for r in raw_metrics:
             m = r["metrics"]
             score = (
-                self.weights["fan_in"] * (m["fan_in"] / max_fan_in) +
-                self.weights["fan_out"] * (m["fan_out"] / max_fan_out) +
+                self.weights["fan_in"] * (m["effective_fan_in"] / max_fan_in) +
+                self.weights["fan_out"] * (m["effective_fan_out"] / max_fan_out) +
                 self.weights["loc"] * (m["loc"] / max_loc) +
                 self.weights["parameter_count"] * (m["parameter_count"] / max_params) +
                 self.weights["async_flag"] * m["async_flag"] + # binary already
@@ -186,6 +196,8 @@ class HotspotScorer:
                     "has_blocking_wait": r["has_blocking_wait"],
                 },
                 "metrics": m,
+                "inbound_call_types": r["inbound_call_types"],
+                "outbound_call_types": r["outbound_call_types"],
                 "project_name": r["project_name"],
                 "is_test_project": r["is_test_project"],
             })
@@ -348,6 +360,7 @@ class HotspotScorer:
             
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("# Repository Hotspots\n\n")
+            f.write("> `Effective Fan-in/Fan-out` discounts framework-owned synthetic dispatch edges so scoring stays useful without hiding those relationships.\n\n")
             
             # --- Anti-Pattern Warnings (God Class) ---
             anti_patterns = [h for h in hotspots if h["is_anti_pattern"] and not h["is_test_project"]]
@@ -355,13 +368,13 @@ class HotspotScorer:
                 f.write("## ⚠️ Anti-Pattern Warnings (God Class / Service Locator)\n\n")
                 f.write("> [!WARNING]\n")
                 f.write("> The following classes have unusually high 'Danger Scores' (Fan-In × LOC) and names suggesting they might be managing global state or acting as God Classes.\n\n")
-                f.write("| Rank | Danger Score | Reason | Symbol (FQN) | LOC | Fan-in |\n")
-                f.write("|------|--------------|--------|--------------|-----|--------|\n")
+                f.write("| Rank | Danger Score | Reason | Symbol (FQN) | LOC | Fan-in | Effective Fan-in |\n")
+                f.write("|------|--------------|--------|--------------|-----|--------|------------------|\n")
                 for i, h in enumerate(anti_patterns[:20]):
                     m = h["metrics"]
                     link = f"[`{h['fqn']}`]({h['file_name']}#L{h['line_start']})" if h['file_name'] else f"`{h['fqn']}`"
                     reason = ", ".join(h.get("anti_pattern_reasons", []))
-                    f.write(f"| {i+1} | {h['danger_score']} | {reason} | {link} | {m['loc']} | {m['fan_in']} |\n")
+                    f.write(f"| {i+1} | {h['danger_score']} | {reason} | {link} | {m['loc']} | {m['fan_in']} | {m['effective_fan_in']:.2f} |\n")
                 f.write("\n---\n\n")
 
             # --- Threading Hazard Warnings ---
@@ -422,14 +435,14 @@ class HotspotScorer:
 
             # --- General Hotspots ---
             f.write("## Top 50 Hotspots (General)\n\n")
-            f.write("| Rank | Score | Kind | Symbol (FQN) | LOC | Fan-in | Fan-out |\n")
-            f.write("|------|-------|------|--------------|-----|--------|----------|\n")
+            f.write("| Rank | Score | Kind | Symbol (FQN) | LOC | Fan-in | Effective Fan-in | Fan-out | Effective Fan-out |\n")
+            f.write("|------|-------|------|--------------|-----|--------|------------------|---------|-------------------|\n")
             
             ranked_hotspots = [h for h in hotspots if not h["is_test_project"]]
             for i, h in enumerate(ranked_hotspots[:50]): # Top 50
                 m = h["metrics"]
                 link = f"[`{h['fqn']}`]({h['file_name']}#L{h['line_start']})" if h['file_name'] else f"`{h['fqn']}`"
-                f.write(f"| {i+1} | {h['score']:.4f} | {h['kind']} | {link} | {m['loc']} | {m['fan_in']} | {m['fan_out']} |\n")
+                f.write(f"| {i+1} | {h['score']:.4f} | {h['kind']} | {link} | {m['loc']} | {m['fan_in']} | {m['effective_fan_in']:.2f} | {m['fan_out']} | {m['effective_fan_out']:.2f} |\n")
 
         logger.info(f"Generated hotspot reports: {json_path}, {md_path}")
         if shared_state:

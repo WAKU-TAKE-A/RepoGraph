@@ -47,9 +47,11 @@ class HotspotScorerTests(unittest.TestCase):
                 {"id": "App.Editor", "kind": "class"},
                 {"id": "App.Editor.Load()", "kind": "method"},
                 {"id": "App.Editor.Save()", "kind": "method"},
+                {"id": "framework::ui.lifecycle.OnLoaded", "kind": "framework_method"},
             ],
             [
                 {"source": "App.Editor.Load()", "target": "App.Editor.Save()", "type": "calls", "call_count": 1},
+                {"source": "framework::ui.lifecycle.OnLoaded", "target": "App.Editor.Load()", "type": "lifecycle_entrypoint", "call_count": 1},
             ],
         )
         write_graph(
@@ -123,6 +125,18 @@ class HotspotScorerTests(unittest.TestCase):
         self.assertEqual(editor["metrics"]["static_coupling"], 1)
         self.assertTrue(editor["is_anti_pattern"])
 
+    def test_hotspots_discount_framework_synthetic_inbound_edges_for_effective_score(self) -> None:
+        loader = GraphLoader(str(self.workspace))
+        loader.load_all()
+        scorer = HotspotScorer(self.session, loader, str(self.reports_dir))
+
+        hotspots = scorer.compute_hotspots()
+        load_method = next(h for h in hotspots if h["fqn"] == "App.Editor.Load()")
+
+        self.assertEqual(load_method["metrics"]["fan_in"], 1)
+        self.assertLess(load_method["metrics"]["effective_fan_in"], 1.0)
+        self.assertIn("lifecycle_entrypoint:framework_source", load_method["inbound_call_types"])
+
     def test_shared_mutable_state_ignores_framework_properties(self) -> None:
         loader = GraphLoader(str(self.workspace))
         loader.load_all()
@@ -154,6 +168,7 @@ class HotspotScorerTests(unittest.TestCase):
         payload = json.loads((self.reports_dir / "hotspots.json").read_text(encoding="utf-8"))
 
         self.assertIn("## 🔴 Shared Mutable State (Runtime/Event — High Risk)", markdown)
+        self.assertIn("Effective Fan-in", markdown)
         self.assertIn("App.State.Value", markdown)
         self.assertEqual(len(payload["shared_mutable_state"]), 1)
         self.assertEqual(payload["shared_mutable_state"][0]["target_fqn"], "App.State.Value")
