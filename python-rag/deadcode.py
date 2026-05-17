@@ -83,6 +83,12 @@ class DeadCodeDetector:
                 if self._looks_like_accessor_method(sym):
                     continue
 
+                if self._looks_like_message_recipient_method(sym):
+                    continue
+
+                if self._looks_like_explicit_interface_method(sym):
+                    continue
+
                 if self._looks_like_framework_convention_method(sym):
                     continue
 
@@ -386,6 +392,9 @@ class DeadCodeDetector:
         if name.startswith("handle") and containing_type.endswith(("behavior", "adapter")):
             return True
 
+        if name.endswith("propertychanged") and "(dependencyobject, dependencypropertychangedeventargs)" in (sym.fqn or "").lower():
+            return True
+
         if name == "save" and containing_type.endswith("viewmodel"):
             return True
 
@@ -401,6 +410,35 @@ class DeadCodeDetector:
             return True
 
         return False
+
+    def _looks_like_message_recipient_method(self, sym: Symbol) -> bool:
+        name = (sym.name or "").lower()
+        fqn_lower = (sym.fqn or "").lower()
+        if name != "receive":
+            return False
+
+        if ".messages." in fqn_lower:
+            return True
+
+        if not sym.containing_type:
+            return False
+
+        siblings = self._symbols_by_containing_type.get(sym.containing_type, [])
+        receive_methods = [member for member in siblings if member.kind == "method" and (member.name or "").lower() == "receive"]
+        return len(receive_methods) >= 2
+
+    @staticmethod
+    def _looks_like_explicit_interface_method(sym: Symbol) -> bool:
+        if not sym.containing_type:
+            return False
+
+        fqn = sym.fqn or ""
+        if not fqn.startswith(sym.containing_type + "."):
+            return False
+
+        suffix = fqn[len(sym.containing_type) + 1:]
+        method_part = suffix.split("(", 1)[0]
+        return "." in method_part
 
     def _is_test_artifact(self, sym: Symbol, file_path: str) -> bool:
         if sym.project_id in self._test_project_ids:
