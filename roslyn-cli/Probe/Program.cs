@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using Microsoft.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
+using System.Xml.Linq;
 
 namespace Probe
 {
@@ -150,7 +151,19 @@ namespace Probe
 
                         await persistence.ResetProjectAnalysisDataAsync(projectId);
                         savedProjectIds.Add(project.Id);
-                        await persistence.SaveProjectAsync(projectId, solutionId, runId, project.Name, project.FilePath ?? project.Name);
+                        var projectMetadata = LoadProjectMetadata(project.FilePath, project, documentsToAnalyze.Count);
+                        await persistence.SaveProjectAsync(
+                            projectId,
+                            solutionId,
+                            runId,
+                            projectMetadata.Name,
+                            project.FilePath ?? project.Name,
+                            projectMetadata.AssemblyName,
+                            projectMetadata.TargetFramework,
+                            projectMetadata.ProjectType,
+                            projectMetadata.IsTestProject,
+                            projectMetadata.IsSdkStyle,
+                            projectMetadata.DocumentCount);
 
                         var compilation = await project.GetCompilationAsync();
                         if (compilation == null)
@@ -348,6 +361,126 @@ namespace Probe
                     !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) &&
                     !filterService.ShouldExcludeFile(path))
                 .ToList();
+        }
+
+        private static ProjectMetadata LoadProjectMetadata(string? projectFilePath, Project project, int documentCount)
+        {
+            var displayName = Path.GetFileNameWithoutExtension(projectFilePath)
+                ?? project.AssemblyName
+                ?? project.Name;
+            var assemblyName = project.AssemblyName;
+            var targetFramework = (string?)null;
+            var projectType = project.CompilationOptions?.OutputKind.ToString();
+            var isTestProject = false;
+            var isSdkStyle = false;
+
+            if (!string.IsNullOrWhiteSpace(projectFilePath) && File.Exists(projectFilePath))
+            {
+                try
+                {
+                    var root = XDocument.Load(projectFilePath).Root;
+                    if (root != null)
+                    {
+                        displayName = FirstElementValue(root, "AssemblyName")
+                            ?? displayName;
+                        assemblyName ??= FirstElementValue(root, "AssemblyName");
+                        targetFramework = FirstElementValue(root, "TargetFramework")
+                            ?? FirstElementValue(root, "TargetFrameworks");
+                        projectType = FirstElementValue(root, "OutputType")
+                            ?? projectType;
+                        var explicitIsTestProject = FirstElementValue(root, "IsTestProject");
+                        isSdkStyle = root.Attribute("Sdk") != null
+                            || root.Elements().Any(element => element.Name.LocalName.Equals("Sdk", StringComparison.OrdinalIgnoreCase));
+                        isTestProject = InferTestProject(project, projectFilePath, explicitIsTestProject, displayName);
+                    }
+                }
+                catch
+                {
+                    isTestProject = InferTestProject(project, projectFilePath, null, displayName);
+                }
+            }
+            else
+            {
+                isTestProject = InferTestProject(project, projectFilePath, null, displayName);
+            }
+
+            if (string.IsNullOrWhiteSpace(projectType))
+            {
+                projectType = project.CompilationOptions?.OutputKind == OutputKind.ConsoleApplication
+                    ? "Exe"
+                    : "Library";
+            }
+
+            return new ProjectMetadata
+            {
+                Name = displayName,
+                AssemblyName = assemblyName,
+                TargetFramework = targetFramework,
+                ProjectType = projectType,
+                IsTestProject = isTestProject,
+                IsSdkStyle = isSdkStyle,
+                DocumentCount = documentCount
+            };
+        }
+
+        private static bool InferTestProject(Project project, string? projectFilePath, string? explicitIsTestProject, string displayName)
+        {
+            if (bool.TryParse(explicitIsTestProject, out var explicitValue))
+            {
+                return explicitValue;
+            }
+
+            var combinedName = $"{displayName} {project.Name} {project.AssemblyName} {projectFilePath}".ToLowerInvariant();
+            if (combinedName.Contains(".test")
+                || combinedName.Contains("tests")
+                || combinedName.Contains("integrationtest")
+                || combinedName.Contains("unittest"))
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(projectFilePath) && File.Exists(projectFilePath))
+            {
+                try
+                {
+                    var contents = File.ReadAllText(projectFilePath);
+                    var testMarkers = new[]
+                    {
+                        "Microsoft.NET.Test.Sdk",
+                        "MSTest",
+                        "NUnit",
+                        "xunit",
+                        "coverlet.msbuild"
+                    };
+                    return testMarkers.Any(marker => contents.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0);
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        private static string? FirstElementValue(XElement root, string localName)
+        {
+            return root
+                .Descendants()
+                .FirstOrDefault(element => element.Name.LocalName.Equals(localName, StringComparison.OrdinalIgnoreCase))
+                ?.Value
+                ?.Trim();
+        }
+
+        private sealed class ProjectMetadata
+        {
+            public string Name { get; init; } = "";
+            public string? AssemblyName { get; init; }
+            public string? TargetFramework { get; init; }
+            public string? ProjectType { get; init; }
+            public bool IsTestProject { get; init; }
+            public bool IsSdkStyle { get; init; }
+            public int DocumentCount { get; init; }
         }
     }
 }

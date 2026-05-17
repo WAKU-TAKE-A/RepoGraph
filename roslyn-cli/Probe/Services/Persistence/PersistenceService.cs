@@ -459,20 +459,45 @@ WHERE s1.fqn = @sourceFqn AND s2.fqn = @targetFqn
             await transaction.CommitAsync();
         }
 
-        public async Task SaveProjectAsync(string id, string solutionId, string runId, string name, string path)
+        public async Task SaveProjectAsync(
+            string id,
+            string solutionId,
+            string runId,
+            string name,
+            string path,
+            string? assemblyName,
+            string? targetFramework,
+            string? projectType,
+            bool isTestProject,
+            bool isSdkStyle,
+            int documentCount)
         {
             using var connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync();
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
-INSERT OR REPLACE INTO projects (id, solution_id, analysis_run_id, name, file_path, analysis_status)
-VALUES (@id, @sid, @rid, @name, @path, 'success')";
+INSERT OR REPLACE INTO projects (
+    id, solution_id, analysis_run_id, name, file_path,
+    assembly_name, target_framework, project_type, is_test_project,
+    is_sdk_style, document_count, analysis_status
+)
+VALUES (
+    @id, @sid, @rid, @name, @path,
+    @assemblyName, @targetFramework, @projectType, @isTestProject,
+    @isSdkStyle, @documentCount, 'success'
+)";
             command.Parameters.AddWithValue("@id", id);
             command.Parameters.AddWithValue("@sid", solutionId);
             command.Parameters.AddWithValue("@rid", runId);
             command.Parameters.AddWithValue("@name", name);
             command.Parameters.AddWithValue("@path", path);
+            command.Parameters.AddWithValue("@assemblyName", (object?)assemblyName ?? DBNull.Value);
+            command.Parameters.AddWithValue("@targetFramework", (object?)targetFramework ?? DBNull.Value);
+            command.Parameters.AddWithValue("@projectType", (object?)projectType ?? DBNull.Value);
+            command.Parameters.AddWithValue("@isTestProject", isTestProject ? 1 : 0);
+            command.Parameters.AddWithValue("@isSdkStyle", isSdkStyle ? 1 : 0);
+            command.Parameters.AddWithValue("@documentCount", documentCount);
             await command.ExecuteNonQueryAsync();
         }
 

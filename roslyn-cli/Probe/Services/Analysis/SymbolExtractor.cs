@@ -154,7 +154,8 @@ namespace Probe.Services.Analysis
                 ExtractOverrideDispatch(compilationCache, method, symbolData, result);
             }
 
-            if (symbol is IMethodSymbol && IsExecutableNode(declarationNode))
+            if ((symbol is IMethodSymbol && IsExecutableNode(declarationNode))
+                || (symbol is IPropertySymbol && HasPropertyExecutableBody(declarationNode)))
             {
                 ExtractMethodCalls(compilationCache, semanticModel, declarationNode, symbolData, result);
                 ExtractFrameworkConventionDependencies(compilationCache, semanticModel, declarationNode, symbolData, result);
@@ -259,6 +260,16 @@ namespace Probe.Services.Analysis
                 || node is ConstructorDeclarationSyntax
                 || node is AccessorDeclarationSyntax
                 || node is LocalFunctionStatementSyntax;
+        }
+
+        private static bool HasPropertyExecutableBody(SyntaxNode node)
+        {
+            if (node is not PropertyDeclarationSyntax property)
+            {
+                return false;
+            }
+
+            return property.ExpressionBody != null;
         }
 
         private static void ExtractOverrideDispatch(

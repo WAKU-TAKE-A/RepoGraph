@@ -17,6 +17,10 @@ class DeadCodeDetector:
             project_id
             for (project_id,) in self.session.query(Project.id).filter(Project.is_test_project == 1).all()
         }
+        self._symbols_by_containing_type: Dict[str, List[Symbol]] = {}
+        for symbol in self.session.query(Symbol).all():
+            if symbol.containing_type:
+                self._symbols_by_containing_type.setdefault(symbol.containing_type, []).append(symbol)
 
     def detect_dead_code_candidates(self) -> List[Dict]:
         candidates = []
@@ -34,16 +38,6 @@ class DeadCodeDetector:
 
             # 0. テスト資産は entrypoint / assertion / attribute / runner 規約が強く、静的参照だけで死活判定しにくい
             if self._is_test_artifact(sym, file_path):
-                continue
-
-            # 0.5. 動的ローダーや framework convention による登録対象は、deadcode 候補としての信頼度が低い
-            if self._looks_like_dynamic_module(sym, file_path):
-                continue
-
-            if self._looks_like_discovered_endpoint(sym, file_path):
-                continue
-
-            if self._looks_like_reflection_discovered_implementation(sym, file_path):
                 continue
 
             # 0. グラフ側で入辺が見えている場合は、DB の fan_in が古い/粗い可能性があるため除外
@@ -70,6 +64,9 @@ class DeadCodeDetector:
                 if self._looks_like_framework_convention_type(sym):
                     continue
 
+                if self._type_has_live_members(sym):
+                    continue
+
                 if fqn in self.graph.inheritance_graph:
                     derived_classes = list(self.graph.inheritance_graph.predecessors(fqn))
                     if len(derived_classes) > 0:
@@ -83,10 +80,16 @@ class DeadCodeDetector:
             if "main(" in fqn_lower: 
                 continue
             if sym.kind == "method":
+                if self._looks_like_accessor_method(sym):
+                    continue
+
                 if self._looks_like_framework_convention_method(sym):
                     continue
 
                 if self._looks_like_host_integration_method(sym, file_path):
+                    continue
+
+                if self._looks_like_partial_ui_event_handler(sym):
                     continue
 
                 if sym.containing_type and self._looks_like_ui_type_name(sym.containing_type):
@@ -116,12 +119,13 @@ class DeadCodeDetector:
                     ".onshown(", ".onclosing(", ".onclosed(", ".initializecomponent("
                 ]):
                     continue
-                    
             candidates.append({
                 "fqn": sym.fqn,
                 "kind": sym.kind,
                 "loc": sym.loc if sym.loc else 0,
                 "file": file_name,
+                "signals": self._collect_isolation_signals(sym),
+                "why": "",
                 "related": [],
                 "category": "isolated",
             })
@@ -134,8 +138,10 @@ class DeadCodeDetector:
         candidates = self.detect_dead_code_candidates()
         self._attach_related_candidates(candidates)
         self._categorize_candidates(candidates)
+        self._attach_explanations(candidates)
         candidates = self._prioritize_candidates(candidates)
         report_path = os.path.join(self.reports_dir, "dead_code_candidates.md")
+        json_path = os.path.join(self.reports_dir, "dead_code_candidates.json")
         
         with open(report_path, "w", encoding="utf-8") as f:
             f.write("# Dead Code Candidates\n\n")
@@ -146,16 +152,40 @@ class DeadCodeDetector:
             f.write(f"- `isolated`: {category_counts['isolated']} candidates with weak or no nearby matches\n")
             f.write(f"- `structural-sibling`: {category_counts['structural-sibling']} candidates with some structural similarity nearby\n")
             f.write(f"- `near-family`: {category_counts['near-family']} candidates that strongly resemble existing family members or variants\n\n")
-            f.write("| Rank | Category | Related | LOC | Kind | Symbol (FQN) | File |\n")
-            f.write("|------|----------|---------|-----|------|--------------|------|\n")
+            f.write("| Rank | Category | Related | LOC | Kind | Why It Looks Isolated | Symbol (FQN) | File |\n")
+            f.write("|------|----------|---------|-----|------|------------------------|--------------|------|\n")
             for i, c in enumerate(candidates, 1):
                 f.write(
-                    f"| {i} | `{c['category']}` | {len(c['related'])} | {c['loc']} | {c['kind']} | `{c['fqn']}` | {c['file']} |\n"
+                    f"| {i} | `{c['category']}` | {len(c['related'])} | {c['loc']} | {c['kind']} | {c['why']} | `{c['fqn']}` | {c['file']} |\n"
                 )
+
+            detailed_candidates = candidates[:20]
+            if detailed_candidates:
+                f.write("\n## Why These Candidates Surfaced\n\n")
+                f.write("> [!NOTE]\n")
+                f.write("> The notes below summarize which structural signals were missing and whether RepoGraph found nearby family members.\n\n")
+                for candidate in detailed_candidates:
+                    f.write(f"<details><summary>`{candidate['fqn']}`</summary>\n\n")
+                    f.write(f"- category: `{candidate['category']}`\n")
+                    f.write(f"- why: {candidate['why']}\n")
+                    signal_summary = self._format_signal_summary(candidate["signals"])
+                    if signal_summary:
+                        f.write(f"- structural signals: {signal_summary}\n")
+                    if candidate["related"]:
+                        f.write("- nearby symbols:\n")
+                        for related in candidate["related"]:
+                            reason_text = ", ".join(related["reasons"][:4])
+                            line = f"  - `{related['fqn']}` ({related['kind']}, score {related['score']:.4f})"
+                            if reason_text:
+                                line += f" — {reason_text}"
+                            f.write(line + "\n")
+                    else:
+                        f.write("- nearby symbols: none above the similarity threshold\n")
+                    f.write("\n</details>\n\n")
 
             annotated_candidates = [candidate for candidate in candidates[:20] if candidate["related"]]
             if annotated_candidates:
-                f.write("\n## Related Existing Implementations\n\n")
+                f.write("## Related Existing Implementations\n\n")
                 f.write("> [!TIP]\n")
                 f.write("> These candidates have nearby existing symbols with similar naming or structural context.\n")
                 f.write("> Use this section to check whether the candidate is actually a duplicate family member, a callback slot, or a refactoring target rather than dead code.\n\n")
@@ -167,6 +197,10 @@ class DeadCodeDetector:
                         if reason_text:
                             f.write(f"  reasons: {reason_text}\n")
                     f.write("\n</details>\n\n")
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            import json
+            json.dump({"candidates": candidates}, f, indent=2, ensure_ascii=False)
                 
         logger.info(f"Generated dead code report with {len(candidates)} candidates at {report_path}")
 
@@ -177,6 +211,10 @@ class DeadCodeDetector:
                 continue
             related = self.related_finder.find_related(symbol, top_k=3)
             candidate["related"] = [item.to_dict() for item in related if item.score >= 0.45]
+
+    def _attach_explanations(self, candidates: List[Dict]) -> None:
+        for candidate in candidates:
+            candidate["why"] = self._build_candidate_explanation(candidate)
 
     @staticmethod
     def _categorize_candidates(candidates: List[Dict]) -> None:
@@ -234,6 +272,63 @@ class DeadCodeDetector:
             counts[candidate["category"]] = counts.get(candidate["category"], 0) + 1
         return counts
 
+    def _collect_isolation_signals(self, sym: Symbol) -> Dict[str, int]:
+        fqn = sym.fqn
+        signals = {
+            "callers": self._graph_predecessor_count("call_graph", fqn),
+            "type_users": self._graph_predecessor_count("type_dependency_graph", fqn),
+            "field_users": self._graph_predecessor_count("field_access_graph", fqn),
+            "derived_types": self._graph_predecessor_count("inheritance_graph", fqn),
+            "callees": self._graph_successor_count("call_graph", fqn),
+            "used_types": self._graph_successor_count("type_dependency_graph", fqn),
+            "used_fields": self._graph_successor_count("field_access_graph", fqn),
+        }
+
+        if sym.containing_type:
+            signals["containing_type_users"] = self._graph_predecessor_count("type_dependency_graph", sym.containing_type)
+
+        return signals
+
+    def _build_candidate_explanation(self, candidate: Dict) -> str:
+        signals = candidate["signals"]
+        missing = []
+        if signals.get("callers", 0) == 0:
+            missing.append("no callers")
+        if signals.get("type_users", 0) == 0:
+            missing.append("no type users")
+        if signals.get("field_users", 0) == 0 and candidate["kind"] in {"field", "property"}:
+            missing.append("no field readers/writers")
+        if candidate["kind"] in {"class", "interface"} and signals.get("derived_types", 0) == 0:
+            missing.append("no derived types")
+        if candidate["kind"] == "constructor" and signals.get("containing_type_users", 0) == 0:
+            missing.append("owning type has no detected type users")
+
+        if not missing:
+            missing.append("no inbound structural references")
+
+        if candidate["related"]:
+            strongest = candidate["related"][0]
+            reason_text = ", ".join(strongest.get("reasons", [])[:2])
+            if reason_text:
+                return f"{'; '.join(missing)}; nearest sibling looks like {reason_text}"
+            return f"{'; '.join(missing)}; has nearby structural sibling"
+
+        return "; ".join(missing)
+
+    @staticmethod
+    def _format_signal_summary(signals: Dict[str, int]) -> str:
+        labels = (
+            ("callers", "callers"),
+            ("type_users", "type users"),
+            ("field_users", "field users"),
+            ("derived_types", "derived types"),
+            ("callees", "callees"),
+            ("used_types", "used types"),
+            ("used_fields", "used fields"),
+            ("containing_type_users", "owning type users"),
+        )
+        return ", ".join(f"{label}={signals.get(key, 0)}" for key, label in labels if key in signals)
+
     @staticmethod
     def _looks_like_ui_type(sym: Symbol) -> bool:
         name = sym.name or ""
@@ -250,8 +345,9 @@ class DeadCodeDetector:
     @staticmethod
     def _looks_like_framework_convention_type(sym: Symbol) -> bool:
         name = (sym.name or "").split(".")[-1]
-        return name in {"App", "Program"} or name.endswith((
-            "Module", "Converter", "Behavior", "Extension", "Extensions", "ExtensionMethods"
+        return name in {"App", "Program", "Startup"} or name.endswith((
+            "Module", "Converter", "Behavior", "Extension", "Extensions", "ExtensionMethods",
+            "Controller", "Middleware", "ActionFilter"
         ))
 
     @staticmethod
@@ -281,7 +377,9 @@ class DeadCodeDetector:
         if name in {
             "onstartup", "oninitialize", "onactivated", "onapplytemplate",
             "onframeworkinitializationcompleted",
-            "convert", "convertback", "load"
+            "convert", "convertback", "load",
+            "configure", "configureservices",
+            "onactionexecuting", "onactionexecuted"
         }:
             return True
 
@@ -316,54 +414,6 @@ class DeadCodeDetector:
         return any(marker in combined for marker in markers)
 
     @staticmethod
-    def _looks_like_dynamic_module(sym: Symbol, file_path: str) -> bool:
-        combined = f"{sym.fqn} {file_path}".lower()
-        namespace_markers = (
-            ".library.backend.",
-            ".library.modules.",
-            ".library.secretprovider.",
-            ".library.sourceprovider.",
-            ".library.sourceproviders.",
-            ".library.encryption.",
-            ".library.compression.",
-            ".library.windowsmodules.",
-            ".library.dynamicloader.",
-        )
-        path_markers = (
-            "\\library\\backend\\",
-            "\\library\\modules\\",
-            "\\library\\secretprovider\\",
-            "\\library\\sourceprovider\\",
-            "\\library\\sourceproviders\\",
-            "\\library\\encryption\\",
-            "\\library\\compression\\",
-            "\\library\\windowsmodules\\",
-            "\\library\\dynamicloader\\",
-        )
-        type_suffixes = (
-            "backend", "secretprovider", "sourceprovider", "restoredestinationprovider",
-            "encryption", "compression", "modules", "loader",
-        )
-
-        if any(marker in combined for marker in namespace_markers + path_markers):
-            return True
-
-        short_name = (sym.name or "").split(".")[-1].lower()
-        return any(short_name.endswith(suffix) for suffix in type_suffixes)
-
-    @staticmethod
-    def _looks_like_discovered_endpoint(sym: Symbol, file_path: str) -> bool:
-        combined = f"{sym.fqn} {file_path}".lower()
-        if "\\webservercore\\endpoints\\" in combined:
-            return True
-
-        short_name = (sym.name or "").split(".")[-1]
-        if short_name in {"Auth", "Filesystem", "ConnectionStrings", "DestinationVerify"}:
-            return "\\webservercore\\" in combined
-
-        return False
-
-    @staticmethod
     def _looks_like_host_integration_method(sym: Symbol, file_path: str) -> bool:
         name = (sym.name or "").lower()
         containing_type = (sym.containing_type or "").split(".")[-1].lower()
@@ -372,11 +422,28 @@ class DeadCodeDetector:
         if name in {"main", "mainasync"}:
             return True
 
-        if name in {"invoke", "invokeasync"} and containing_type.endswith("middleware"):
+        if name in {"invoke", "invokeasync"} and (
+            containing_type.endswith("middleware")
+            or "\\middleware\\" in path_lower
+        ):
             return True
 
         if name.startswith("use") and containing_type.endswith(("extensions", "middleware")):
             return True
+
+        if name in {"configure", "configureservices"} and containing_type == "startup":
+            return True
+
+        if name in {"onactionexecuting", "onactionexecuted"} and (
+            containing_type.endswith("filter")
+            or "\\controllers\\" in path_lower
+            or "\\filters\\" in path_lower
+        ):
+            return True
+
+        if "\\controllers\\" in path_lower and containing_type.endswith("controller"):
+            if (sym.accessibility or "").lower() == "public":
+                return True
 
         if name == "map" and (
             containing_type.endswith(("endpoint", "endpoints", "extensions"))
@@ -388,46 +455,48 @@ class DeadCodeDetector:
             return True
 
         return False
+    def _type_has_live_members(self, sym: Symbol) -> bool:
+        members = self._symbols_by_containing_type.get(sym.fqn, [])
+        for member in members:
+            if member.fan_in and member.fan_in > 0:
+                return True
 
-    def _looks_like_reflection_discovered_implementation(self, sym: Symbol, file_path: str) -> bool:
-        if sym.kind != "class":
-            return False
-
-        fqn = sym.fqn
-        short_name = (sym.name or "").split(".")[-1]
-        file_lower = file_path.lower()
-
-        reflection_base_suffixes = (
-            "imageeffectbase",
-            "imageuploader",
-            "fileuploader",
-            "textuploader",
-        )
-        reflection_path_markers = (
-            "\\imageeffects\\",
-            "\\imageuploaders\\",
-            "\\fileuploaders\\",
-            "\\textuploaders\\",
-        )
-        reflection_name_suffixes = (
-            "imageeffect",
-            "uploader",
-        )
-
-        if hasattr(self.graph, "inheritance_graph") and fqn in self.graph.inheritance_graph:
-            try:
-                for base_fqn in self.graph.inheritance_graph.successors(fqn):
-                    base_short_name = base_fqn.split(".")[-1].lower()
-                    if any(base_short_name.endswith(suffix) for suffix in reflection_base_suffixes):
-                        return True
-            except Exception:
-                pass
-
-        if any(marker in file_lower for marker in reflection_path_markers):
-            if any(short_name.lower().endswith(suffix) for suffix in reflection_name_suffixes):
+            if self._has_graph_predecessors(member.fqn):
                 return True
 
         return False
+
+    @staticmethod
+    def _looks_like_partial_ui_event_handler(sym: Symbol) -> bool:
+        name = (sym.name or "")
+        file_path = sym.document.file_path.lower() if sym.document and sym.document.file_path else ""
+        containing_type = sym.containing_type or ""
+
+        if not containing_type:
+            return False
+
+        if not any(part in file_path for part in (".axaml.cs", ".xaml.cs", "\\views\\", "\\controls\\")):
+            return False
+
+        if name.startswith("On") and (
+            name.endswith("Requested")
+            or name.endswith("Changed")
+            or name.endswith("Activated")
+            or name.endswith("Selected")
+        ):
+            return True
+
+        return False
+
+    @staticmethod
+    def _looks_like_accessor_method(sym: Symbol) -> bool:
+        fqn = sym.fqn or ""
+        name = sym.name or ""
+        return (
+            fqn.endswith(".get")
+            or fqn.endswith(".set")
+            or name in {"get", "set", "add", "remove"}
+        )
 
     def _has_graph_predecessors(self, fqn: str) -> bool:
         graph_names = ("call_graph", "inheritance_graph", "type_dependency_graph", "field_access_graph")
@@ -443,3 +512,23 @@ class DeadCodeDetector:
                 continue
 
         return False
+
+    def _graph_predecessor_count(self, graph_name: str, fqn: str) -> int:
+        graph = getattr(self.graph, graph_name, None)
+        if graph is None or fqn not in graph:
+            return 0
+
+        try:
+            return sum(1 for _ in graph.predecessors(fqn))
+        except Exception:
+            return 0
+
+    def _graph_successor_count(self, graph_name: str, fqn: str) -> int:
+        graph = getattr(self.graph, graph_name, None)
+        if graph is None or fqn not in graph:
+            return 0
+
+        try:
+            return sum(1 for _ in graph.successors(fqn))
+        except Exception:
+            return 0

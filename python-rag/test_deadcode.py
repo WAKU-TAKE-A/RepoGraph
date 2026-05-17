@@ -49,47 +49,17 @@ class DeadCodeDetectorTests(unittest.TestCase):
         )
         self.session.add_all(
             [
-                Document(id="doc1", project_id="p1", file_path=r"C:\repo\ImageEffects\GlowImageEffect.cs", file_name="GlowImageEffect.cs"),
-                Document(id="doc2", project_id="p1", file_path=r"C:\repo\Services\PlainUtility.cs", file_name="PlainUtility.cs"),
-                Document(id="doc3", project_id="p1", file_path=r"C:\repo\Views\EditorView.axaml.cs", file_name="EditorView.axaml.cs"),
-                Document(id="doc4", project_id="p1", file_path=r"C:\repo\Services\PlainUtilityHelper.cs", file_name="PlainUtilityHelper.cs"),
-                Symbol(
-                    id="effect",
-                    document_id="doc1",
-                    project_id="p1",
-                    fqn="App.Effects.GlowImageEffect",
-                    name="GlowImageEffect",
-                    kind="class",
-                    namespace="App.Effects",
-                    containing_type=None,
-                    accessibility="public",
-                    is_static=0,
-                    is_abstract=0,
-                    is_sealed=0,
-                    is_async=0,
-                    is_partial=0,
-                    is_generic=0,
-                    is_extension_method=0,
-                    is_disposable=0,
-                    is_volatile=0,
-                    line_start=1,
-                    line_end=100,
-                    loc=100,
-                    parameter_count=0,
-                    return_type=None,
-                    has_callback=0,
-                    has_ui_dispatch=0,
-                    has_task_spawn=0,
-                    has_background_worker=0,
-                    has_do_events=0,
-                    has_lock=0,
-                    has_thread_start=0,
-                    has_blocking_wait=0,
-                    fan_in=0,
-                ),
+                Document(id="doc1", project_id="p1", file_path=r"C:\repo\Services\PlainUtility.cs", file_name="PlainUtility.cs"),
+                Document(id="doc2", project_id="p1", file_path=r"C:\repo\Views\EditorView.axaml.cs", file_name="EditorView.axaml.cs"),
+                Document(id="doc3", project_id="p1", file_path=r"C:\repo\Rendering\WidgetRenderer.cs", file_name="WidgetRenderer.cs"),
+                Document(id="doc4", project_id="p1", file_path=r"C:\repo\Uploaders\CustomFileUploader.cs", file_name="CustomFileUploader.cs"),
+                Document(id="doc5", project_id="p1", file_path=r"C:\repo\Server\Startup.cs", file_name="Startup.cs"),
+                Document(id="doc6", project_id="p1", file_path=r"C:\repo\Server\Middleware\CustomExceptionHandler.cs", file_name="CustomExceptionHandler.cs"),
+                Document(id="doc7", project_id="p1", file_path=r"C:\repo\Server\Controllers\IndexerApiController.cs", file_name="IndexerApiController.cs"),
+                Document(id="doc8", project_id="p1", file_path=r"C:\repo\Server\Controllers\RequiresIndexer.cs", file_name="RequiresIndexer.cs"),
                 Symbol(
                     id="plain",
-                    document_id="doc2",
+                    document_id="doc1",
                     project_id="p1",
                     fqn="App.Services.PlainUtility",
                     name="PlainUtility",
@@ -122,13 +92,13 @@ class DeadCodeDetectorTests(unittest.TestCase):
                     fan_in=0,
                 ),
                 Symbol(
-                    id="plain-helper",
+                    id="uploader-class",
                     document_id="doc4",
                     project_id="p1",
-                    fqn="App.Services.PlainUtilityHelper",
-                    name="PlainUtilityHelper",
+                    fqn="App.Uploaders.CustomFileUploaderService",
+                    name="CustomFileUploaderService",
                     kind="class",
-                    namespace="App.Services",
+                    namespace="App.Uploaders",
                     containing_type=None,
                     accessibility="public",
                     is_static=0,
@@ -153,11 +123,45 @@ class DeadCodeDetectorTests(unittest.TestCase):
                     has_lock=0,
                     has_thread_start=0,
                     has_blocking_wait=0,
-                    fan_in=2,
+                    fan_in=0,
+                ),
+                Symbol(
+                    id="uploader-method",
+                    document_id="doc4",
+                    project_id="p1",
+                    fqn="App.Uploaders.CustomFileUploaderService.CreateUploader()",
+                    name="CreateUploader",
+                    kind="method",
+                    namespace="App.Uploaders",
+                    containing_type="App.Uploaders.CustomFileUploaderService",
+                    accessibility="public",
+                    is_static=0,
+                    is_abstract=0,
+                    is_sealed=0,
+                    is_async=0,
+                    is_partial=0,
+                    is_generic=0,
+                    is_extension_method=0,
+                    is_disposable=0,
+                    is_volatile=0,
+                    line_start=1,
+                    line_end=10,
+                    loc=10,
+                    parameter_count=0,
+                    return_type="object",
+                    has_callback=0,
+                    has_ui_dispatch=0,
+                    has_task_spawn=0,
+                    has_background_worker=0,
+                    has_do_events=0,
+                    has_lock=0,
+                    has_thread_start=0,
+                    has_blocking_wait=0,
+                    fan_in=1,
                 ),
                 Symbol(
                     id="onloaded",
-                    document_id="doc3",
+                    document_id="doc2",
                     project_id="p1",
                     fqn="App.Views.EditorView.OnLoaded(RoutedEventArgs)",
                     name="OnLoaded",
@@ -191,7 +195,7 @@ class DeadCodeDetectorTests(unittest.TestCase):
                 ),
                 Symbol(
                     id="render",
-                    document_id="doc2",
+                    document_id="doc3",
                     project_id="p1",
                     fqn="App.Rendering.WidgetRenderer.Render(DrawingContext)",
                     name="Render",
@@ -223,33 +227,203 @@ class DeadCodeDetectorTests(unittest.TestCase):
                     has_blocking_wait=0,
                     fan_in=0,
                 ),
+                Symbol(
+                    id="getter",
+                    document_id="doc1",
+                    project_id="p1",
+                    fqn="App.ViewModels.MainViewModel.ActiveToolName.get",
+                    name="get",
+                    kind="method",
+                    namespace="App.ViewModels",
+                    containing_type="App.ViewModels.MainViewModel",
+                    accessibility="public",
+                    is_static=0,
+                    is_abstract=0,
+                    is_sealed=0,
+                    is_async=0,
+                    is_partial=0,
+                    is_generic=0,
+                    is_extension_method=0,
+                    is_disposable=0,
+                    is_volatile=0,
+                    line_start=41,
+                    line_end=44,
+                    loc=4,
+                    parameter_count=0,
+                    return_type="string",
+                    has_callback=0,
+                    has_ui_dispatch=0,
+                    has_task_spawn=0,
+                    has_background_worker=0,
+                    has_do_events=0,
+                    has_lock=0,
+                    has_thread_start=0,
+                    has_blocking_wait=0,
+                    fan_in=0,
+                ),
+                Symbol(
+                    id="startup-configure",
+                    document_id="doc5",
+                    project_id="p1",
+                    fqn="App.Server.Startup.Configure(IApplicationBuilder, IWebHostEnvironment)",
+                    name="Configure",
+                    kind="method",
+                    namespace="App.Server",
+                    containing_type="App.Server.Startup",
+                    accessibility="public",
+                    is_static=0,
+                    is_abstract=0,
+                    is_sealed=0,
+                    is_async=0,
+                    is_partial=0,
+                    is_generic=0,
+                    is_extension_method=0,
+                    is_disposable=0,
+                    is_volatile=0,
+                    line_start=1,
+                    line_end=20,
+                    loc=20,
+                    parameter_count=2,
+                    return_type=None,
+                    has_callback=0,
+                    has_ui_dispatch=0,
+                    has_task_spawn=0,
+                    has_background_worker=0,
+                    has_do_events=0,
+                    has_lock=0,
+                    has_thread_start=0,
+                    has_blocking_wait=0,
+                    fan_in=0,
+                ),
+                Symbol(
+                    id="middleware-invoke",
+                    document_id="doc6",
+                    project_id="p1",
+                    fqn="App.Server.Middleware.CustomExceptionHandler.Invoke(HttpContext)",
+                    name="Invoke",
+                    kind="method",
+                    namespace="App.Server.Middleware",
+                    containing_type="App.Server.Middleware.CustomExceptionHandler",
+                    accessibility="public",
+                    is_static=0,
+                    is_abstract=0,
+                    is_sealed=0,
+                    is_async=0,
+                    is_partial=0,
+                    is_generic=0,
+                    is_extension_method=0,
+                    is_disposable=0,
+                    is_volatile=0,
+                    line_start=1,
+                    line_end=20,
+                    loc=20,
+                    parameter_count=1,
+                    return_type="Task",
+                    has_callback=0,
+                    has_ui_dispatch=0,
+                    has_task_spawn=0,
+                    has_background_worker=0,
+                    has_do_events=0,
+                    has_lock=0,
+                    has_thread_start=0,
+                    has_blocking_wait=0,
+                    fan_in=0,
+                ),
+                Symbol(
+                    id="controller-action",
+                    document_id="doc7",
+                    project_id="p1",
+                    fqn="App.Server.Controllers.IndexerApiController.Config()",
+                    name="Config",
+                    kind="method",
+                    namespace="App.Server.Controllers",
+                    containing_type="App.Server.Controllers.IndexerApiController",
+                    accessibility="public",
+                    is_static=0,
+                    is_abstract=0,
+                    is_sealed=0,
+                    is_async=0,
+                    is_partial=0,
+                    is_generic=0,
+                    is_extension_method=0,
+                    is_disposable=0,
+                    is_volatile=0,
+                    line_start=1,
+                    line_end=20,
+                    loc=20,
+                    parameter_count=0,
+                    return_type="ActionResult",
+                    has_callback=0,
+                    has_ui_dispatch=0,
+                    has_task_spawn=0,
+                    has_background_worker=0,
+                    has_do_events=0,
+                    has_lock=0,
+                    has_thread_start=0,
+                    has_blocking_wait=0,
+                    fan_in=0,
+                ),
+                Symbol(
+                    id="action-filter",
+                    document_id="doc8",
+                    project_id="p1",
+                    fqn="App.Server.Controllers.RequiresIndexer.OnActionExecuting(ActionExecutingContext)",
+                    name="OnActionExecuting",
+                    kind="method",
+                    namespace="App.Server.Controllers",
+                    containing_type="App.Server.Controllers.RequiresIndexer",
+                    accessibility="public",
+                    is_static=0,
+                    is_abstract=0,
+                    is_sealed=0,
+                    is_async=0,
+                    is_partial=0,
+                    is_generic=0,
+                    is_extension_method=0,
+                    is_disposable=0,
+                    is_volatile=0,
+                    line_start=1,
+                    line_end=20,
+                    loc=20,
+                    parameter_count=1,
+                    return_type=None,
+                    has_callback=0,
+                    has_ui_dispatch=0,
+                    has_task_spawn=0,
+                    has_background_worker=0,
+                    has_do_events=0,
+                    has_lock=0,
+                    has_thread_start=0,
+                    has_blocking_wait=0,
+                    fan_in=0,
+                ),
             ]
         )
         self.session.commit()
 
         self.graph_loader = GraphLoader(str(self.workspace))
         self.graph_loader.load_all()
-        self.graph_loader.inheritance_graph.add_edge(
-            "App.Effects.GlowImageEffect",
-            "Framework.ImageEffectBase",
-            type="extends",
-        )
 
     def tearDown(self) -> None:
         self.session.close()
         self.engine.dispose()
         self.temp_dir.cleanup()
 
-    def test_reflection_discovered_implementations_are_excluded(self) -> None:
+    def test_deadcode_keeps_only_generic_exclusions(self) -> None:
         detector = DeadCodeDetector(self.session, self.graph_loader, str(self.workspace / "output" / "reports"))
 
         candidates = detector.detect_dead_code_candidates()
         candidate_fqns = {candidate["fqn"] for candidate in candidates}
 
-        self.assertNotIn("App.Effects.GlowImageEffect", candidate_fqns)
         self.assertIn("App.Services.PlainUtility", candidate_fqns)
+        self.assertNotIn("App.Uploaders.CustomFileUploaderService", candidate_fqns)
         self.assertNotIn("App.Views.EditorView.OnLoaded(RoutedEventArgs)", candidate_fqns)
         self.assertNotIn("App.Rendering.WidgetRenderer.Render(DrawingContext)", candidate_fqns)
+        self.assertNotIn("App.ViewModels.MainViewModel.ActiveToolName.get", candidate_fqns)
+        self.assertNotIn("App.Server.Startup.Configure(IApplicationBuilder, IWebHostEnvironment)", candidate_fqns)
+        self.assertNotIn("App.Server.Middleware.CustomExceptionHandler.Invoke(HttpContext)", candidate_fqns)
+        self.assertNotIn("App.Server.Controllers.IndexerApiController.Config()", candidate_fqns)
+        self.assertNotIn("App.Server.Controllers.RequiresIndexer.OnActionExecuting(ActionExecutingContext)", candidate_fqns)
 
     def test_deadcode_report_includes_related_existing_implementations_section(self) -> None:
         detector = DeadCodeDetector(self.session, self.graph_loader, str(self.workspace / "output" / "reports"))
@@ -257,13 +431,14 @@ class DeadCodeDetectorTests(unittest.TestCase):
         detector.generate_report()
 
         report = (self.workspace / "output" / "reports" / "dead_code_candidates.md").read_text(encoding="utf-8")
+        json_report = (self.workspace / "output" / "reports" / "dead_code_candidates.json").read_text(encoding="utf-8")
 
         self.assertIn("## Investigation Categories", report)
-        self.assertIn("| Rank | Category | Related | LOC | Kind | Symbol (FQN) | File |", report)
-        self.assertIn("## Related Existing Implementations", report)
-        self.assertIn("App.Services.PlainUtility", report)
-        self.assertIn("App.Services.PlainUtilityHelper", report)
-        self.assertIn("`near-family`", report)
+        self.assertIn("| Rank | Category | Related | LOC | Kind | Why It Looks Isolated | Symbol (FQN) | File |", report)
+        self.assertIn("## Why These Candidates Surfaced", report)
+        self.assertIn("no callers", report)
+        self.assertIn("\"why\":", json_report)
+        self.assertIn("\"signals\":", json_report)
 
 
 if __name__ == "__main__":
