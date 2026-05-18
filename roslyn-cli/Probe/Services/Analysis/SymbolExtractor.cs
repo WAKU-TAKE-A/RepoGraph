@@ -729,7 +729,36 @@ namespace Probe.Services.Analysis
 
         private static IEnumerable<IMethodSymbol> ResolveDelegateTargetMethods(SemanticModel semanticModel, ExpressionSyntax expression)
         {
-            if (expression is AnonymousFunctionExpressionSyntax anonymousFunction)
+            var unwrappedExpression = UnwrapExpression(expression);
+
+            if (TryResolveMethodGroupByLookup(semanticModel, unwrappedExpression, out var lookedUpMethods))
+            {
+                foreach (var method in lookedUpMethods)
+                {
+                    yield return method;
+                }
+
+                yield break;
+            }
+
+            if (semanticModel.GetOperation(unwrappedExpression) is IDelegateCreationOperation delegateCreation)
+            {
+                foreach (var method in ResolveDelegateTargetMethodsFromOperation(delegateCreation.Target))
+                {
+                    yield return method;
+                }
+
+                yield break;
+            }
+
+            if (semanticModel.GetOperation(unwrappedExpression) is IMethodReferenceOperation methodReference &&
+                methodReference.Method != null)
+            {
+                yield return methodReference.Method;
+                yield break;
+            }
+
+            if (unwrappedExpression is AnonymousFunctionExpressionSyntax anonymousFunction)
             {
                 var anonymousSymbol = semanticModel.GetOperation(anonymousFunction) is IAnonymousFunctionOperation anonymousOperation
                     ? anonymousOperation.Symbol
@@ -741,24 +770,126 @@ namespace Probe.Services.Analysis
                 }
             }
 
-            var directInfo = semanticModel.GetSymbolInfo(expression);
+            var directInfo = semanticModel.GetSymbolInfo(unwrappedExpression);
             if (directInfo.Symbol is IMethodSymbol directMethod)
             {
                 yield return directMethod;
                 yield break;
             }
 
-            if (expression is ObjectCreationExpressionSyntax creation &&
+            foreach (var candidate in directInfo.CandidateSymbols.OfType<IMethodSymbol>())
+            {
+                yield return candidate;
+            }
+
+            if (unwrappedExpression is ObjectCreationExpressionSyntax creation &&
                 creation.ArgumentList is { Arguments.Count: > 0 })
             {
                 foreach (var argument in creation.ArgumentList.Arguments)
                 {
+                    if (semanticModel.GetOperation(argument.Expression) is IMethodReferenceOperation nestedReference &&
+                        nestedReference.Method != null)
+                    {
+                        yield return nestedReference.Method;
+                        continue;
+                    }
+
                     var argInfo = semanticModel.GetSymbolInfo(argument.Expression);
                     if (argInfo.Symbol is IMethodSymbol method)
                     {
                         yield return method;
                     }
+                    else
+                    {
+                        foreach (var candidate in argInfo.CandidateSymbols.OfType<IMethodSymbol>())
+                        {
+                            yield return candidate;
+                        }
+                    }
                 }
+            }
+        }
+
+        private static bool TryResolveMethodGroupByLookup(
+            SemanticModel semanticModel,
+            ExpressionSyntax expression,
+            out IEnumerable<IMethodSymbol> methods)
+        {
+            methods = Enumerable.Empty<IMethodSymbol>();
+            string? methodName = null;
+
+            switch (expression)
+            {
+                case IdentifierNameSyntax identifier:
+                    methodName = identifier.Identifier.ValueText;
+                    break;
+
+                case MemberAccessExpressionSyntax memberAccess when memberAccess.Expression is ThisExpressionSyntax or BaseExpressionSyntax:
+                    methodName = memberAccess.Name.Identifier.ValueText;
+                    break;
+            }
+
+            if (string.IsNullOrWhiteSpace(methodName))
+            {
+                return false;
+            }
+
+            var lookedUp = semanticModel.LookupSymbols(expression.SpanStart, name: methodName)
+                .OfType<IMethodSymbol>()
+                .ToList();
+
+            if (lookedUp.Count == 0)
+            {
+                lookedUp = ResolveMethodGroupByContainingTypeSyntax(semanticModel, expression, methodName).ToList();
+                if (lookedUp.Count == 0)
+                {
+                    return false;
+                }
+            }
+
+            methods = lookedUp;
+            return true;
+        }
+
+        private static IEnumerable<IMethodSymbol> ResolveMethodGroupByContainingTypeSyntax(
+            SemanticModel semanticModel,
+            SyntaxNode expression,
+            string methodName)
+        {
+            var containingType = expression.AncestorsAndSelf().OfType<TypeDeclarationSyntax>().FirstOrDefault();
+            if (containingType == null)
+            {
+                yield break;
+            }
+
+            foreach (var methodDeclaration in containingType.Members
+                         .OfType<MethodDeclarationSyntax>()
+                         .Where(method => string.Equals(method.Identifier.ValueText, methodName, StringComparison.Ordinal)))
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(methodDeclaration);
+                if (symbol != null)
+                {
+                    yield return symbol;
+                }
+            }
+        }
+
+        private static IEnumerable<IMethodSymbol> ResolveDelegateTargetMethodsFromOperation(IOperation? operation)
+        {
+            if (operation == null)
+            {
+                yield break;
+            }
+
+            if (operation is IMethodReferenceOperation methodReference && methodReference.Method != null)
+            {
+                yield return methodReference.Method;
+                yield break;
+            }
+
+            if (operation is IAnonymousFunctionOperation anonymousFunction && anonymousFunction.Symbol != null)
+            {
+                yield return anonymousFunction.Symbol;
             }
         }
 
@@ -2339,31 +2470,260 @@ namespace Probe.Services.Analysis
         {
             foreach (var invocation in GetAnalysisDescendantNodes(node).OfType<InvocationExpressionSyntax>())
             {
-                var calledMethod = ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation));
+                var calledMethod = ResolveInvokedMethodSymbol(semanticModel, invocation);
                 if (calledMethod == null)
                 {
+                    TryRecordFrameworkDelegateArgumentsFromInvocationFallback(semanticModel, invocation, symbolData, result);
                     continue;
                 }
 
-                RecordDelegateArguments(semanticModel, symbolData, result, calledMethod.Parameters, invocation.ArgumentList.Arguments);
+                RecordDelegateArguments(semanticModel, symbolData, result, calledMethod, calledMethod.Parameters, invocation.ArgumentList.Arguments);
             }
 
             foreach (var creation in GetAnalysisDescendantNodes(node).OfType<ObjectCreationExpressionSyntax>())
             {
-                var constructor = ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(creation));
-                if (constructor == null || creation.ArgumentList == null)
+                var constructor = ResolveConstructedMethodSymbol(semanticModel, creation);
+                if (constructor == null)
+                {
+                    if (creation.ArgumentList != null)
+                    {
+                        TryRecordFrameworkDelegateArgumentsFromObjectCreationFallback(semanticModel, creation, symbolData, result);
+                    }
+
+                    continue;
+                }
+
+                if (creation.ArgumentList == null)
                 {
                     continue;
                 }
 
-                RecordDelegateArguments(semanticModel, symbolData, result, constructor.Parameters, creation.ArgumentList.Arguments);
+                RecordDelegateArguments(semanticModel, symbolData, result, constructor, constructor.Parameters, creation.ArgumentList.Arguments);
             }
         }
+
+        private static void TryRecordFrameworkDelegateArgumentsFromInvocationFallback(
+            SemanticModel semanticModel,
+            InvocationExpressionSyntax invocation,
+            SymbolData symbolData,
+            ExtractionResult result)
+        {
+            if (!TryDescribeFrameworkDelegateInvocationFallback(semanticModel, invocation, out var descriptor))
+            {
+                return;
+            }
+
+            RecordFrameworkDelegateFallbackTargets(semanticModel, symbolData, result, invocation.ArgumentList.Arguments, descriptor);
+        }
+
+        private static void TryRecordFrameworkDelegateArgumentsFromObjectCreationFallback(
+            SemanticModel semanticModel,
+            ObjectCreationExpressionSyntax creation,
+            SymbolData symbolData,
+            ExtractionResult result)
+        {
+            if (creation.ArgumentList == null ||
+                !TryDescribeFrameworkDelegateObjectCreationFallback(semanticModel, creation, out var descriptor))
+            {
+                return;
+            }
+
+            RecordFrameworkDelegateFallbackTargets(semanticModel, symbolData, result, creation.ArgumentList.Arguments, descriptor);
+        }
+
+        private static void RecordFrameworkDelegateFallbackTargets(
+            SemanticModel semanticModel,
+            SymbolData symbolData,
+            ExtractionResult result,
+            SeparatedSyntaxList<ArgumentSyntax> arguments,
+            FrameworkDelegateFallbackDescriptor descriptor)
+        {
+            for (var i = 0; i < arguments.Count; i++)
+            {
+                var targets = ResolveDelegateTargetMethods(semanticModel, arguments[i].Expression).ToList();
+                if (targets.Count == 0)
+                {
+                    continue;
+                }
+
+                var fallbackCallerFqn = EnsureSyntheticFrameworkSymbol(
+                    result,
+                    $"{descriptor.FrameworkCallerPrefix}::arg{i}",
+                    descriptor.FrameworkCallerName,
+                    descriptor.FrameworkNamespace,
+                    descriptor.FrameworkContainingType,
+                    descriptor.ReturnType,
+                    descriptor.ParameterCount);
+
+                foreach (var targetMethod in targets)
+                {
+                    var handlerFqn = targetMethod.OriginalDefinition.ToDisplayString();
+                    result.MethodCalls.Add(new MethodCallData
+                    {
+                        CallerId = symbolData.Fqn,
+                        CalleeId = handlerFqn,
+                        CallCount = 1,
+                        CallType = "delegate_reference"
+                    });
+
+                    result.MethodCalls.Add(new MethodCallData
+                    {
+                        CallerId = fallbackCallerFqn,
+                        CalleeId = handlerFqn,
+                        CallCount = 1,
+                        CallType = "framework_delegate_dispatch"
+                    });
+                }
+            }
+        }
+
+        private static bool TryDescribeFrameworkDelegateInvocationFallback(
+            SemanticModel semanticModel,
+            InvocationExpressionSyntax invocation,
+            out FrameworkDelegateFallbackDescriptor descriptor)
+        {
+            descriptor = default;
+            string? methodName = null;
+            string containingType = "FrameworkCallback";
+            string frameworkNamespace = "Framework.Delegates";
+            string frameworkCallerPrefix = "framework::delegate_callback";
+            string frameworkCallerName = "DelegateCallback";
+
+            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+            {
+                methodName = memberAccess.Name.Identifier.ValueText;
+                var receiverType = semanticModel.GetTypeInfo(memberAccess.Expression).Type;
+                if (receiverType != null &&
+                    LooksLikeFrameworkOwnedSymbol(
+                        receiverType.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                        receiverType.ToDisplayString()))
+                {
+                    containingType = receiverType.ToDisplayString();
+                    frameworkNamespace = "Framework.Delegates";
+                    frameworkCallerPrefix = $"framework::{containingType}.{methodName}";
+                    frameworkCallerName = methodName;
+                    descriptor = new FrameworkDelegateFallbackDescriptor(
+                        frameworkCallerPrefix,
+                        frameworkCallerName,
+                        frameworkNamespace,
+                        containingType,
+                        "void",
+                        invocation.ArgumentList.Arguments.Count);
+                    return true;
+                }
+            }
+            else if (invocation.Expression is MemberBindingExpressionSyntax memberBinding)
+            {
+                methodName = memberBinding.Name.Identifier.ValueText;
+                if (invocation.Parent is ConditionalAccessExpressionSyntax conditionalAccess)
+                {
+                    var receiverType = semanticModel.GetTypeInfo(conditionalAccess.Expression).Type;
+                    if (receiverType != null &&
+                        LooksLikeFrameworkOwnedSymbol(
+                            receiverType.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                            receiverType.ToDisplayString()))
+                    {
+                        containingType = receiverType.ToDisplayString();
+                        frameworkNamespace = "Framework.Delegates";
+                        frameworkCallerPrefix = $"framework::{containingType}.{methodName}";
+                        frameworkCallerName = methodName;
+                        descriptor = new FrameworkDelegateFallbackDescriptor(
+                            frameworkCallerPrefix,
+                            frameworkCallerName,
+                            frameworkNamespace,
+                            containingType,
+                            "void",
+                            invocation.ArgumentList.Arguments.Count);
+                        return true;
+                    }
+                }
+            }
+            else if (invocation.Expression is IdentifierNameSyntax identifierName)
+            {
+                methodName = identifierName.Identifier.ValueText;
+            }
+
+            if (string.IsNullOrWhiteSpace(methodName))
+            {
+                return false;
+            }
+
+            if (string.Equals(methodName, "AddHook", StringComparison.Ordinal))
+            {
+                descriptor = new FrameworkDelegateFallbackDescriptor(
+                    "framework::System.Windows.Interop.HwndSource.AddHook",
+                    "AddHook",
+                    "Framework.Delegates",
+                    "System.Windows.Interop.HwndSource",
+                    "IntPtr",
+                    invocation.ArgumentList.Arguments.Count);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryDescribeFrameworkDelegateObjectCreationFallback(
+            SemanticModel semanticModel,
+            ObjectCreationExpressionSyntax creation,
+            out FrameworkDelegateFallbackDescriptor descriptor)
+        {
+            descriptor = default;
+            var createdType = semanticModel.GetTypeInfo(creation).Type
+                ?? semanticModel.GetTypeInfo(creation.Type).Type;
+
+            var createdTypeName = createdType?.ToDisplayString()
+                ?? creation.Type.ToString();
+
+            if (string.IsNullOrWhiteSpace(createdTypeName))
+            {
+                return false;
+            }
+
+            var simpleName = createdTypeName.Split('.').Last();
+            if (simpleName.EndsWith("PropertyMetadata", StringComparison.Ordinal))
+            {
+                descriptor = new FrameworkDelegateFallbackDescriptor(
+                    $"framework::{createdTypeName}.callback",
+                    simpleName,
+                    "Framework.UI",
+                    createdTypeName,
+                    "void",
+                    creation.ArgumentList?.Arguments.Count ?? 0);
+                return true;
+            }
+
+            if (createdType != null &&
+                LooksLikeFrameworkOwnedSymbol(
+                    createdType.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                    createdType.ToDisplayString()))
+            {
+                descriptor = new FrameworkDelegateFallbackDescriptor(
+                    $"framework::{createdType.ToDisplayString()}.ctor",
+                    simpleName,
+                    "Framework.Delegates",
+                    createdType.ToDisplayString(),
+                    createdType.ToDisplayString(),
+                    creation.ArgumentList?.Arguments.Count ?? 0);
+                return true;
+            }
+
+            return false;
+        }
+
+        private readonly record struct FrameworkDelegateFallbackDescriptor(
+            string FrameworkCallerPrefix,
+            string FrameworkCallerName,
+            string FrameworkNamespace,
+            string FrameworkContainingType,
+            string ReturnType,
+            int ParameterCount);
 
         private static void RecordDelegateArguments(
             SemanticModel semanticModel,
             SymbolData symbolData,
             ExtractionResult result,
+            IMethodSymbol? calleeSymbol,
             ImmutableArray<IParameterSymbol> parameters,
             SeparatedSyntaxList<ArgumentSyntax> arguments)
         {
@@ -2377,15 +2737,53 @@ namespace Probe.Services.Analysis
 
                 foreach (var targetMethod in ResolveDelegateTargetMethods(semanticModel, arguments[i].Expression))
                 {
+                    var handlerFqn = targetMethod.OriginalDefinition.ToDisplayString();
                     result.MethodCalls.Add(new MethodCallData
                     {
                         CallerId = symbolData.Fqn,
-                        CalleeId = targetMethod.OriginalDefinition.ToDisplayString(),
+                        CalleeId = handlerFqn,
                         CallCount = 1,
                         CallType = "delegate_reference"
                     });
+
+                    if (calleeSymbol != null &&
+                        TryGetFrameworkDelegateDispatchCallerFqn(result, calleeSymbol, parameter, out var dispatchCaller))
+                    {
+                        result.MethodCalls.Add(new MethodCallData
+                        {
+                            CallerId = dispatchCaller,
+                            CalleeId = handlerFqn,
+                            CallCount = 1,
+                            CallType = "framework_delegate_dispatch"
+                        });
+                    }
                 }
             }
+        }
+
+        private static bool TryGetFrameworkDelegateDispatchCallerFqn(
+            ExtractionResult result,
+            IMethodSymbol calleeSymbol,
+            IParameterSymbol delegateParameter,
+            out string dispatchCaller)
+        {
+            dispatchCaller = string.Empty;
+            var containingType = calleeSymbol.ContainingType?.ToDisplayString();
+            var containingNamespace = calleeSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
+            if (!LooksLikeFrameworkOwnedSymbol(containingNamespace, containingType))
+            {
+                return false;
+            }
+
+            dispatchCaller = EnsureSyntheticFrameworkSymbol(
+                result,
+                $"framework::{calleeSymbol.OriginalDefinition.ToDisplayString()}::{delegateParameter.Name}",
+                delegateParameter.Name,
+                "Framework.Delegates",
+                containingType,
+                delegateParameter.Type?.ToDisplayString(),
+                delegateParameter.Type is INamedTypeSymbol namedType ? namedType.DelegateInvokeMethod?.Parameters.Length ?? 0 : 0);
+            return !string.IsNullOrWhiteSpace(dispatchCaller);
         }
 
         private static bool IsDelegateLike(ITypeSymbol? type)
@@ -2479,6 +2877,26 @@ namespace Probe.Services.Analysis
             }
 
             return null;
+        }
+
+        private static IMethodSymbol? ResolveInvokedMethodSymbol(SemanticModel semanticModel, InvocationExpressionSyntax invocation)
+        {
+            if (semanticModel.GetOperation(invocation) is IInvocationOperation invocationOperation)
+            {
+                return invocationOperation.TargetMethod;
+            }
+
+            return ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation));
+        }
+
+        private static IMethodSymbol? ResolveConstructedMethodSymbol(SemanticModel semanticModel, ObjectCreationExpressionSyntax creation)
+        {
+            if (semanticModel.GetOperation(creation) is IObjectCreationOperation creationOperation)
+            {
+                return creationOperation.Constructor;
+            }
+
+            return ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(creation));
         }
 
         private static IMethodSymbol? GetContainingExecutableMethod(ISymbol? symbol)

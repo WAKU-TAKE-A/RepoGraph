@@ -36,6 +36,7 @@ class GraphLoader:
         self.dependency_graph = nx.DiGraph()
         self.field_access_graph = nx.DiGraph()
         self.type_dependency_graph = nx.DiGraph()
+        self.ai_soft_graph = nx.DiGraph()
 
     def load_all(self):
         self.call_graph = self._load_graph("call_graph.json")
@@ -44,6 +45,39 @@ class GraphLoader:
         self.field_access_graph = self._load_graph("field_access_graph.json")
         self.type_dependency_graph = self._load_graph("type_dependency_graph.json")
         logger.info("Graph loading completed.")
+
+    def load_ai_soft_edges(self, reports_dir: str | None = None):
+        self.ai_soft_graph = self._load_ai_soft_graph(reports_dir)
+
+    def _load_ai_soft_graph(self, reports_dir: str | None = None) -> nx.DiGraph:
+        filepath = self._resolve_ai_soft_path(reports_dir)
+        if not filepath:
+            logger.info("AI soft edge report not found. Continuing without ai_soft_graph.")
+            return nx.DiGraph()
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            edges = payload.get("edges", payload if isinstance(payload, list) else [])
+            graph = nx.DiGraph()
+            for edge in edges:
+                source = edge.get("source")
+                target = edge.get("target")
+                if not source or not target:
+                    continue
+                graph.add_edge(
+                    source,
+                    target,
+                    type=edge.get("type", "ai_soft_edge"),
+                    confidence=edge.get("confidence"),
+                    evidence=edge.get("evidence", []),
+                    notes=edge.get("notes", ""),
+                )
+            logger.info(f"Loaded ai_soft_edges.json: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+            return graph
+        except Exception as e:
+            logger.error(f"Failed to load AI soft edge file {filepath}: {e}")
+            return nx.DiGraph()
 
     def _load_graph(self, filename: str) -> nx.DiGraph:
         filepath = self._resolve_graph_path(filename)
@@ -71,6 +105,23 @@ class GraphLoader:
             os.path.join(self.graphs_dir, "output", "graphs", filename),
             os.path.join(self.graphs_dir, "graphs", filename),
         ]
+
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+
+        return None
+
+    def _resolve_ai_soft_path(self, reports_dir: str | None = None) -> str | None:
+        candidates: list[str] = []
+        if reports_dir:
+            candidates.append(os.path.join(reports_dir, "ai_soft_edges.json"))
+
+        candidates.extend([
+            os.path.join(os.path.dirname(self.graphs_dir), "reports", "ai_soft_edges.json"),
+            os.path.join(self.graphs_dir, "output", "reports", "ai_soft_edges.json"),
+            os.path.join(self.graphs_dir, "reports", "ai_soft_edges.json"),
+        ])
 
         for candidate in candidates:
             if os.path.exists(candidate):

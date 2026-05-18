@@ -7,10 +7,11 @@ from loguru import logger
 from related import RelatedFinder
 
 class DeadCodeDetector:
-    def __init__(self, session: Session, graph_loader: GraphLoader, reports_dir: str):
+    def __init__(self, session: Session, graph_loader: GraphLoader, reports_dir: str, include_ai_soft_edges: bool = False):
         self.session = session
         self.graph = graph_loader
         self.reports_dir = reports_dir
+        self.include_ai_soft_edges = include_ai_soft_edges
         self.related_finder = RelatedFinder(session, graph_loader)
         os.makedirs(self.reports_dir, exist_ok=True)
         self._test_project_ids = {
@@ -20,6 +21,7 @@ class DeadCodeDetector:
         self._symbols_by_containing_type: Dict[str, List[Symbol]] = {}
         self._suppressed_by_rule: Dict[str, int] = {}
         self._suppressed_by_family: Dict[str, int] = {}
+        self._suppressed_by_ai_soft_edges: List[Dict[str, Any]] = []
         for symbol in self.session.query(Symbol).all():
             if symbol.containing_type:
                 self._symbols_by_containing_type.setdefault(symbol.containing_type, []).append(symbol)
@@ -28,6 +30,7 @@ class DeadCodeDetector:
         candidates = []
         self._suppressed_by_rule = {}
         self._suppressed_by_family = {}
+        self._suppressed_by_ai_soft_edges = []
         # fan_in == 0 のシンボルを取得（明示的なメソッド呼び出しがないもの）
         symbols = self.session.query(Symbol).filter(Symbol.fan_in == 0).all()
         
@@ -47,7 +50,18 @@ class DeadCodeDetector:
                 continue
 
             # 0. グラフ側で入辺が見えている場合は、DB の fan_in が古い/粗い可能性があるため除外
-            if self._has_graph_predecessors(fqn):
+            if self._has_hard_graph_predecessors(fqn):
+                continue
+            ai_soft_predecessors = self._get_ai_soft_predecessors(fqn)
+            if ai_soft_predecessors:
+                self._suppressed_by_ai_soft_edges.append({
+                    "fqn": sym.fqn,
+                    "kind": sym.kind,
+                    "file": file_name,
+                    "sources": sorted({source for source, _edge_type in ai_soft_predecessors})[:8],
+                    "edge_types": sorted({edge_type for _source, edge_type in ai_soft_predecessors})[:8],
+                    "edge_count": len(ai_soft_predecessors),
+                })
                 continue
             
             # 1. 型依存関係グラフ（Type Dependency）によるセーフティネット
@@ -144,6 +158,17 @@ class DeadCodeDetector:
                 for rule_id, count in sorted(self._suppressed_by_rule.items()):
                     f.write(f"| `{rule_id}` | {count} |\n")
                 f.write("\n")
+            if self._suppressed_by_ai_soft_edges:
+                f.write("## Suppressed By AI Soft Edges\n\n")
+                f.write("> These symbols still have `fan_in = 0` in the hard graph, but imported AI soft edges supplied additional inbound evidence.\n")
+                f.write("> Review these entries carefully before promoting the pattern into hard extraction rules.\n\n")
+                f.write("| Symbol | Kind | Soft Edge Count | Soft Edge Types | Soft Sources |\n")
+                f.write("|--------|------|-----------------|-----------------|--------------|\n")
+                for item in self._suppressed_by_ai_soft_edges[:30]:
+                    edge_types = ", ".join(f"`{edge_type}`" for edge_type in item["edge_types"])
+                    sources = ", ".join(f"`{source}`" for source in item["sources"])
+                    f.write(f"| `{item['fqn']}` | {item['kind']} | {item['edge_count']} | {edge_types} | {sources} |\n")
+                f.write("\n")
             f.write("| Rank | Category | Related | LOC | Kind | Why It Looks Isolated | Symbol (FQN) | File |\n")
             f.write("|------|----------|---------|-----|------|------------------------|--------------|------|\n")
             for i, c in enumerate(candidates, 1):
@@ -198,9 +223,11 @@ class DeadCodeDetector:
         with open(json_path, "w", encoding="utf-8") as f:
             import json
             json.dump({
+                "analysis_mode": "hard+ai-soft-edges" if self.include_ai_soft_edges else "hard-only",
                 "candidates": candidates,
                 "suppressed_by_rule": self._suppressed_by_rule,
                 "suppressed_by_family": self._suppressed_by_family,
+                "suppressed_by_ai_soft_edges": self._suppressed_by_ai_soft_edges,
             }, f, indent=2, ensure_ascii=False)
                 
         logger.info(f"Generated dead code report with {len(candidates)} candidates at {report_path}")
@@ -697,7 +724,7 @@ class DeadCodeDetector:
             if member.fan_in and member.fan_in > 0:
                 return True
 
-            if self._has_graph_predecessors(member.fqn):
+            if self._has_hard_graph_predecessors(member.fqn):
                 return True
 
         return False
@@ -734,20 +761,32 @@ class DeadCodeDetector:
             or name in {"get", "set", "add", "remove"}
         )
 
-    def _has_graph_predecessors(self, fqn: str) -> bool:
-        graph_names = ("call_graph", "inheritance_graph", "type_dependency_graph", "field_access_graph")
-        for graph_name in graph_names:
-            graph = getattr(self.graph, graph_name, None)
-            if graph is None or fqn not in graph:
-                continue
-
+    def _has_hard_graph_predecessors(self, fqn: str) -> bool:
+        graph = getattr(self.graph, "call_graph", None)
+        if graph is not None and fqn in graph:
             try:
                 if any(True for _ in graph.predecessors(fqn)):
                     return True
             except Exception:
-                continue
+                pass
 
         return False
+
+    def _get_ai_soft_predecessors(self, fqn: str) -> List[tuple[str, str]]:
+        if not self.include_ai_soft_edges:
+            return []
+
+        soft_graph = getattr(self.graph, "ai_soft_graph", None)
+        if soft_graph is None or fqn not in soft_graph:
+            return []
+
+        try:
+            return [
+                (source, data.get("type", "ai_soft_edge"))
+                for source, _target, data in soft_graph.in_edges(fqn, data=True)
+            ]
+        except Exception:
+            return []
 
     def _graph_predecessor_count(self, graph_name: str, fqn: str) -> int:
         graph = getattr(self.graph, graph_name, None)

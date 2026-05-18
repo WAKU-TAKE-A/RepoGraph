@@ -21,6 +21,35 @@ Use these exact paths when running commands:
 
 ## 3. Primary Workflow
 
+### 3.0 Navigation Before Grep
+Do not jump to raw `grep` first.
+Use RepoGraph's light navigation commands first so you start from analyzed structure instead of raw text.
+
+```powershell
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py files --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 30
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py symbols --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> "<name or FQN>"
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-deadcode --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-deadcode --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --compare-ai-soft-edges
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py graph-meta --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py xaml-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind all --limit 20
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --bundle-path C:\tmp\candidate_bundle.json
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
+```
+
+Use them like this:
+- `files`: locate analyzed files and project boundaries
+- `symbols`: locate likely entry symbols before opening files
+- `show-hotspots`: see the top structural centers immediately
+- `show-deadcode`: inspect isolated candidates without reading the whole report
+- `show-deadcode --compare-ai-soft-edges`: compare hard-only isolation against AI-soft-edge-aware isolation before deciding whether a pattern deserves hard extraction
+- `graph-meta`: confirm which scan produced the current workspace
+- `xaml-candidates`: identify XAML / code-behind areas where AI-assisted reading is likely worth the cost
+- `ai-candidates`: identify `xaml / reflection / di` areas where AI-assisted reading is likely worth the cost
+- `ai-candidates --bundle-path ...`: emit a prompt-ready candidate bundle JSON for another AI to review
+- `show-ai-edges`: inspect imported AI soft edges before trusting them
+
 ### 3.1 Scan with Probe
 ```powershell
 $env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
@@ -76,6 +105,40 @@ Important:
 - Prefer `dead_code_candidates.json` when another AI or script needs machine-readable reasons.
 - Read `Suppressed Convention Patterns` in the markdown report when you need to understand which framework conventions were intentionally filtered out.
 
+### 3.6 Optional: XAML Candidates For AI Assistance
+```powershell
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py xaml-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
+```
+
+Use this when:
+- XAML / code-behind looks under-connected
+- framework-owned callbacks are still likely missing
+- you want to decide where an AI should read before falling back to raw file-by-file exploration
+
+### 3.6b Optional: Reflection / DI Candidates For AI Assistance
+Use this when hard graph recovery is still weak around plugin loading, runtime activation, service resolution, or registration code.
+
+```powershell
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --limit 20
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind di --limit 20
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --bundle-path C:\tmp\candidate_bundle.json
+```
+
+### 3.7 Optional: Import AI Soft Edges
+If an AI reads difficult XAML / callback code and returns soft edges, import them as a separate layer instead of mixing them into the hard graph.
+
+```powershell
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py import-ai-edges <soft_edges.json> --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+```
+
+To let reports use them, opt in explicitly:
+
+```powershell
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py deadcode --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py related "<known FQN or symbol>" --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
+```
+
 ## 4. Recommended Interpretation
 
 ### When investigating architecture or risk
@@ -114,5 +177,8 @@ Use this sequence:
 ## 6. Behavioral Guidance
 - Do not manually read the whole repository first.
 - Use RepoGraph outputs to choose where to read.
+- Prefer `files` / `symbols` / `show-hotspots` before raw `grep`.
+- Prefer `xaml-candidates` before manually reading large WPF/Avalonia/XAML areas.
+- If you derive candidate XAML/callback edges manually, keep them in `ai_soft_edges.json` and treat them as soft evidence.
 - Prefer evidence from multiple signals over a single report.
 - If `deadcode` conflicts with `hotspots` or obvious framework structure, trust `deadcode` less.

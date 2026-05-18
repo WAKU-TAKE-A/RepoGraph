@@ -29,9 +29,10 @@ class RelatedCandidate:
 
 
 class RelatedFinder:
-    def __init__(self, session: Session, graph_loader: GraphLoader):
+    def __init__(self, session: Session, graph_loader: GraphLoader, include_ai_soft_edges: bool = False):
         self.session = session
         self.graph = graph_loader
+        self.include_ai_soft_edges = include_ai_soft_edges
         self._symbols = self.session.query(Symbol).all()
         self._symbol_by_fqn: Dict[str, Symbol] = {symbol.fqn: symbol for symbol in self._symbols}
 
@@ -154,9 +155,15 @@ class RelatedFinder:
         return candidates[:top_k]
 
     def _collect_graph_features(self, fqn: str) -> Dict[str, Set[str]]:
+        callers = self._predecessors(self.graph.call_graph, fqn)
+        callees = self._successors(self.graph.call_graph, fqn)
+        if self.include_ai_soft_edges:
+            callers |= self._predecessors(self.graph.ai_soft_graph, fqn)
+            callees |= self._successors(self.graph.ai_soft_graph, fqn)
+
         return {
-            "callers": self._predecessors(self.graph.call_graph, fqn),
-            "callees": self._successors(self.graph.call_graph, fqn),
+            "callers": callers,
+            "callees": callees,
             "bases": self._successors(self.graph.inheritance_graph, fqn),
             "derived": self._predecessors(self.graph.inheritance_graph, fqn),
             "type_users": self._predecessors(self.graph.type_dependency_graph, fqn),

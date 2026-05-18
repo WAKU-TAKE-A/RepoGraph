@@ -423,14 +423,110 @@ namespace Probe
                 return new List<string>();
             }
 
-            return Directory.EnumerateFiles(projectDir, "*.*", SearchOption.AllDirectories)
+            var discoveredPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var xamlPath in EnumerateDeclaredXamlFiles(fullProjectPath))
+            {
+                if (IsRelevantXamlPath(xamlPath, filterService))
+                {
+                    discoveredPaths.Add(Path.GetFullPath(xamlPath));
+                }
+            }
+
+            foreach (var xamlPath in Directory.EnumerateFiles(projectDir, "*.*", SearchOption.AllDirectories)
                 .Where(path =>
-                    (path.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase) ||
-                     path.EndsWith(".axaml", StringComparison.OrdinalIgnoreCase)) &&
-                    !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) &&
-                    !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) &&
-                    !filterService.ShouldExcludeFile(path))
-                .ToList();
+                    IsRelevantXamlPath(path, filterService)))
+            {
+                discoveredPaths.Add(Path.GetFullPath(xamlPath));
+            }
+
+            return discoveredPaths.ToList();
+        }
+
+        private static IEnumerable<string> EnumerateDeclaredXamlFiles(string projectFilePath)
+        {
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return EnumerateDeclaredXamlFilesRecursive(projectFilePath, visited);
+        }
+
+        private static IEnumerable<string> EnumerateDeclaredXamlFilesRecursive(string projectFilePath, HashSet<string> visited)
+        {
+            var fullProjectFilePath = Path.GetFullPath(projectFilePath);
+            if (!visited.Add(fullProjectFilePath) || !File.Exists(fullProjectFilePath))
+            {
+                yield break;
+            }
+
+            XDocument document;
+            try
+            {
+                document = XDocument.Load(fullProjectFilePath);
+            }
+            catch
+            {
+                yield break;
+            }
+
+            var projectDir = Path.GetDirectoryName(fullProjectFilePath);
+            if (string.IsNullOrWhiteSpace(projectDir))
+            {
+                yield break;
+            }
+
+            foreach (var element in document.Descendants())
+            {
+                var localName = element.Name.LocalName;
+                if (localName is "Page" or "ApplicationDefinition" or "Resource")
+                {
+                    var include = element.Attribute("Include")?.Value;
+                    if (string.IsNullOrWhiteSpace(include))
+                    {
+                        continue;
+                    }
+
+                    var resolved = ResolveProjectRelativePath(projectDir, include);
+                    if (LooksLikeXamlPath(resolved))
+                    {
+                        yield return resolved;
+                    }
+                }
+
+                if (localName.Equals("Import", StringComparison.OrdinalIgnoreCase))
+                {
+                    var importedProject = element.Attribute("Project")?.Value;
+                    if (string.IsNullOrWhiteSpace(importedProject))
+                    {
+                        continue;
+                    }
+
+                    var importedPath = ResolveProjectRelativePath(projectDir, importedProject);
+                    foreach (var importedXaml in EnumerateDeclaredXamlFilesRecursive(importedPath, visited))
+                    {
+                        yield return importedXaml;
+                    }
+                }
+            }
+        }
+
+        private static string ResolveProjectRelativePath(string baseDirectory, string relativeOrAbsolutePath)
+        {
+            return Path.GetFullPath(Path.IsPathRooted(relativeOrAbsolutePath)
+                ? relativeOrAbsolutePath
+                : Path.Combine(baseDirectory, relativeOrAbsolutePath));
+        }
+
+        private static bool LooksLikeXamlPath(string path)
+        {
+            return path.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".axaml", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsRelevantXamlPath(string path, FilterService filterService)
+        {
+            return LooksLikeXamlPath(path)
+                && !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+                && !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+                && !filterService.ShouldExcludeFile(path);
         }
 
         private static ProjectMetadata LoadProjectMetadata(string? projectFilePath, Project project, int documentCount)
