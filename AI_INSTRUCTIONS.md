@@ -50,6 +50,9 @@ Use them like this:
 - `ai-candidates --bundle-path ...`: emit a prompt-ready candidate bundle JSON for another AI to review
 - `show-ai-edges`: inspect imported AI soft edges before trusting them
 
+**JSON Output & Navigation Hints:**
+Many commands support `--json` (e.g., `show-isolation --json`, `show-hotspots --json`, `rules --json`). Report-oriented JSON outputs such as `show-isolation --json` and `show-hotspots --json` include a `navigation_hints` field. Read this field to understand how to interpret the report and what commands to run next.
+
 ### 3.1 Scan with Probe
 ```powershell
 $env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
@@ -123,6 +126,9 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind di --limit 20
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --bundle-path C:\tmp\candidate_bundle.json
 ```
+
+**AI Bundle Instructions:**
+If you generate a bundle via `--bundle-path`, open the resulting JSON file and read the `usage_notes`, `rule_mode_legend`, and `recommended_commands`. The bundle is designed to serve as a map to guide your manual reading and search strategy, rather than providing a final structural verdict.
 
 ### 3.7 Optional: Import AI Soft Edges
 If an AI reads difficult XAML / callback code and returns soft edges, import them as a separate layer instead of mixing them into the hard graph.

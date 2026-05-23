@@ -61,18 +61,29 @@ LEFT JOIN projects p ON p.id = s.project_id";
             }
 
             using var cmdEdges = connection.CreateCommand();
-            cmdEdges.CommandText = "SELECT source_id, target_id, relationship_type FROM symbol_relationships";
+            cmdEdges.CommandText = "SELECT source_id, target_id, relationship_type, rule_id, rule_family, rule_mode FROM symbol_relationships";
             using var readerEdges = await cmdEdges.ExecuteReaderAsync();
             while (await readerEdges.ReadAsync())
             {
                 var sourceId = readerEdges.GetString(0);
                 var targetId = readerEdges.GetString(1);
                 var type = readerEdges.GetString(2);
+                var ruleId = readerEdges.IsDBNull(3) ? null : readerEdges.GetString(3);
+                var ruleFamily = readerEdges.IsDBNull(4) ? null : readerEdges.GetString(4);
+                var ruleMode = readerEdges.IsDBNull(5) ? null : readerEdges.GetString(5);
 
                 if (symbolIdToFqn.TryGetValue(sourceId, out var sourceFqn) && 
                     symbolIdToFqn.TryGetValue(targetId, out var targetFqn))
                 {
-                    links.Add(new { source = sourceFqn, target = targetFqn, type = type });
+                    links.Add(new
+                    {
+                        source = sourceFqn,
+                        target = targetFqn,
+                        type = type,
+                        rule_id = ruleId,
+                        rule_family = ruleFamily,
+                        rule_mode = ruleMode
+                    });
                 }
             }
 
@@ -245,7 +256,7 @@ WHERE s.kind IN ('method', 'constructor', 'event', 'lambda', 'xaml', 'framework_
             }
 
             using var cmdEdges = connection.CreateCommand();
-            cmdEdges.CommandText = "SELECT caller_id, callee_id, call_count, call_type FROM method_calls";
+            cmdEdges.CommandText = "SELECT caller_id, callee_id, call_count, call_type, rule_id, rule_family, rule_mode FROM method_calls";
             using var readerEdges = await cmdEdges.ExecuteReaderAsync();
             while (await readerEdges.ReadAsync())
             {
@@ -253,11 +264,23 @@ WHERE s.kind IN ('method', 'constructor', 'event', 'lambda', 'xaml', 'framework_
                 var calleeId = readerEdges.GetString(1);
                 var count = readerEdges.GetInt32(2);
                 var callType = readerEdges.GetString(3);
+                var ruleId = readerEdges.IsDBNull(4) ? null : readerEdges.GetString(4);
+                var ruleFamily = readerEdges.IsDBNull(5) ? null : readerEdges.GetString(5);
+                var ruleMode = readerEdges.IsDBNull(6) ? null : readerEdges.GetString(6);
 
                 if (symbolIdToFqn.TryGetValue(callerId, out var callerFqn) && 
                     symbolIdToFqn.TryGetValue(calleeId, out var calleeFqn))
                 {
-                    links.Add(new { source = callerFqn, target = calleeFqn, type = callType, call_count = count });
+                    links.Add(new
+                    {
+                        source = callerFqn,
+                        target = calleeFqn,
+                        type = callType,
+                        call_count = count,
+                        rule_id = ruleId,
+                        rule_family = ruleFamily,
+                        rule_mode = ruleMode
+                    });
                 }
             }
 

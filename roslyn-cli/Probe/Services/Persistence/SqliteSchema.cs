@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS symbol_relationships (
     source_id         TEXT NOT NULL,
     target_id         TEXT NOT NULL,
     relationship_type TEXT NOT NULL,
+    rule_id           TEXT,
+    rule_family       TEXT,
+    rule_mode         TEXT,
     FOREIGN KEY (source_id) REFERENCES symbols(id),
     FOREIGN KEY (target_id) REFERENCES symbols(id)
 );
@@ -116,6 +119,9 @@ CREATE TABLE IF NOT EXISTS method_calls (
     callee_id  TEXT NOT NULL,
     call_count INTEGER NOT NULL DEFAULT 1,
     call_type  TEXT NOT NULL DEFAULT 'calls',
+    rule_id    TEXT,
+    rule_family TEXT,
+    rule_mode  TEXT,
     FOREIGN KEY (caller_id) REFERENCES symbols(id),
     FOREIGN KEY (callee_id) REFERENCES symbols(id)
 );

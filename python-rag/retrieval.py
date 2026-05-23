@@ -99,29 +99,45 @@ class Retriever:
 
     def _expand_graph(self, fqn: str, depth: int) -> List[str]:
         context = set()
-        
-        # Expand via Call Graph
-        if fqn in self.graph.call_graph:
-            for _ in range(depth):
-                callers = list(self.graph.call_graph.predecessors(fqn))
-                callees = list(self.graph.call_graph.successors(fqn))
-                for c in callers: context.add(f"Called by: {c}")
-                for c in callees: context.add(f"Calls: {c}")
 
-        # Expand via Inheritance Graph
-        if fqn in self.graph.inheritance_graph:
-            for _ in range(depth):
-                bases = list(self.graph.inheritance_graph.successors(fqn))
-                derived = list(self.graph.inheritance_graph.predecessors(fqn))
-                for b in bases: context.add(f"Inherits: {b}")
-                for d in derived: context.add(f"Inherited by: {d}")
-                
-        # Expand via Type Dependency Graph (New Feature Integration)
-        if hasattr(self.graph, 'type_dependency_graph') and fqn in self.graph.type_dependency_graph:
-            for _ in range(depth):
-                users = list(self.graph.type_dependency_graph.predecessors(fqn))
-                used_types = list(self.graph.type_dependency_graph.successors(fqn))
-                for u in users: context.add(f"Used as type by: {u}")
-                for u in used_types: context.add(f"Uses type: {u}")
-                
+        def _expand_bidirectional(graph, root: str, limit: int, incoming_prefix: str, outgoing_prefix: str) -> None:
+            if root not in graph or limit <= 0:
+                return
+
+            incoming_seen = {root}
+            outgoing_seen = {root}
+            incoming_frontier = {root}
+            outgoing_frontier = {root}
+
+            for _ in range(limit):
+                next_incoming = set()
+                for current in incoming_frontier:
+                    for neighbor in graph.predecessors(current):
+                        if neighbor in incoming_seen:
+                            continue
+                        incoming_seen.add(neighbor)
+                        next_incoming.add(neighbor)
+                        context.add(f"{incoming_prefix}: {neighbor}")
+
+                next_outgoing = set()
+                for current in outgoing_frontier:
+                    for neighbor in graph.successors(current):
+                        if neighbor in outgoing_seen:
+                            continue
+                        outgoing_seen.add(neighbor)
+                        next_outgoing.add(neighbor)
+                        context.add(f"{outgoing_prefix}: {neighbor}")
+
+                if not next_incoming and not next_outgoing:
+                    break
+
+                incoming_frontier = next_incoming
+                outgoing_frontier = next_outgoing
+
+        _expand_bidirectional(self.graph.call_graph, fqn, depth, "Called by", "Calls")
+        _expand_bidirectional(self.graph.inheritance_graph, fqn, depth, "Inherited by", "Inherits")
+
+        if hasattr(self.graph, 'type_dependency_graph'):
+            _expand_bidirectional(self.graph.type_dependency_graph, fqn, depth, "Used as type by", "Uses type")
+
         return list(context)

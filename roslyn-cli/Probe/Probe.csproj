@@ -24,4 +24,10 @@
     <PackageReference Include="YamlDotNet" Version="17.1.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\rules\framework_rules.json" Link="rules\framework_rules.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

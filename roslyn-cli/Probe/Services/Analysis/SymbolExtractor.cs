@@ -33,7 +33,7 @@ namespace Probe.Services.Analysis
         public Dictionary<string, HashSet<string>> CollectServiceRegistrations(Compilation compilation)
         {
             var registrations = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-            CollectServiceRegistrations(compilation, registrations);
+            ServiceRegistrationCollector.CollectServiceRegistrations(compilation, registrations);
             return registrations;
         }
 
@@ -116,19 +116,22 @@ namespace Probe.Services.Analysis
 
             // Aggregate call counts
             result.MethodCalls = result.MethodCalls
-                .GroupBy(c => new { c.CallerId, c.CalleeId, c.CallType })
+                .GroupBy(c => new { c.CallerId, c.CalleeId, c.CallType, c.RuleId, c.RuleFamily, c.RuleMode })
                 .Select(g => new MethodCallData
                 {
                     CallerId = g.Key.CallerId,
                     CalleeId = g.Key.CalleeId,
                     CallCount = g.Sum(x => x.CallCount),
-                    CallType = g.Key.CallType
+                    CallType = g.Key.CallType,
+                    RuleId = g.Key.RuleId,
+                    RuleFamily = g.Key.RuleFamily,
+                    RuleMode = g.Key.RuleMode
                 }).ToList();
 
             // Deduplicate field accesses (upgrade read to read_write if both read and write exist)
             result.FieldAccesses = DeduplicateFieldAccesses(result.FieldAccesses);
             result.TypeDependencies = result.TypeDependencies
-                .GroupBy(d => new { d.SourceFqn, d.TargetFqn, d.Kind })
+                .GroupBy(d => new { d.SourceFqn, d.TargetFqn, d.Kind, d.RuleId, d.RuleFamily, d.RuleMode })
                 .Select(g => g.First())
                 .ToList();
 
@@ -148,7 +151,7 @@ namespace Probe.Services.Analysis
                     {
                         DerivedId = symbolData.Fqn,
                         BaseId = namedType.BaseType.OriginalDefinition.ToDisplayString(),
-                        Kind = "extends"
+                        Kind = StructuralEdgeCatalog.Extends
                     });
                 }
 
@@ -158,7 +161,7 @@ namespace Probe.Services.Analysis
                     {
                         DerivedId = symbolData.Fqn,
                         BaseId = iface.OriginalDefinition.ToDisplayString(),
-                        Kind = "implements"
+                        Kind = StructuralEdgeCatalog.Implements
                     });
                 }
             }
@@ -253,7 +256,7 @@ namespace Probe.Services.Analysis
             {
                 SourceFqn = sourceFqn,
                 TargetFqn = targetFqn,
-                Kind = "type_usage"
+                Kind = StructuralEdgeCatalog.TypeUsage
             });
 
             if (type is INamedTypeSymbol namedType && namedType.IsGenericType)
@@ -351,7 +354,7 @@ namespace Probe.Services.Analysis
                 CallerId = baseFqn,
                 CalleeId = symbolData.Fqn,
                 CallCount = 1,
-                CallType = "override_dispatch"
+                CallType = StructuralEdgeCatalog.OverrideDispatch
             });
         }
 
@@ -363,7 +366,7 @@ namespace Probe.Services.Analysis
                 Id = GetStableHash(fqn),
                 Fqn = fqn,
                 Name = method.Name,
-                Kind = "framework_method",
+                Kind = SyntheticSymbolKindCatalog.FrameworkMethod,
                 Namespace = method.ContainingNamespace?.ToDisplayString(),
                 ContainingType = method.ContainingType?.ToDisplayString(),
                 Accessibility = method.DeclaredAccessibility.ToString().ToLower(),
@@ -417,7 +420,7 @@ namespace Probe.Services.Analysis
                                 CallerId = symbolData.Fqn,
                                 CalleeId = overrideFqn,
                                 CallCount = 1,
-                                CallType = "dynamic_dispatch"
+                                CallType = StructuralEdgeCatalog.DynamicDispatch
                             });
                         }
                     }
@@ -431,7 +434,7 @@ namespace Probe.Services.Analysis
                             CallerId = symbolData.Fqn,
                             CalleeId = fallbackTarget,
                             CallCount = 1,
-                            CallType = "calls_fallback"
+                            CallType = StructuralEdgeCatalog.CallsFallback
                         });
                     }
                 }
@@ -676,7 +679,7 @@ namespace Probe.Services.Analysis
                     }
 
                     var isSubscribe = assignment.IsKind(SyntaxKind.AddAssignmentExpression);
-                    foreach (var handlerMethod in ResolveDelegateTargetMethods(semanticModel, assignment.Right))
+                    foreach (var handlerMethod in DelegateTargetResolver.ResolveDelegateTargetMethods(semanticModel, assignment.Right))
                     {
                         var handlerFqn = handlerMethod.OriginalDefinition.ToDisplayString();
                         result.MethodCalls.Add(new MethodCallData
@@ -684,7 +687,10 @@ namespace Probe.Services.Analysis
                             CallerId = symbolData.Fqn,
                             CalleeId = handlerFqn,
                             CallCount = 1,
-                            CallType = "delegate_reference"
+                            CallType = FrameworkRuleCatalog.DelegateReference.CallType,
+                            RuleId = FrameworkRuleCatalog.DelegateReference.RuleId,
+                            RuleFamily = FrameworkRuleCatalog.DelegateReference.Family,
+                            RuleMode = FrameworkRuleCatalog.DelegateReference.ModeName
                         });
 
                         if (isSubscribe && eventSymbol != null)
@@ -697,7 +703,10 @@ namespace Probe.Services.Analysis
                                     CallerId = dispatchCaller,
                                     CalleeId = handlerFqn,
                                     CallCount = 1,
-                                    CallType = "event_dispatch"
+                                    CallType = FrameworkRuleCatalog.EventDispatch.CallType,
+                                    RuleId = FrameworkRuleCatalog.EventDispatch.RuleId,
+                                    RuleFamily = FrameworkRuleCatalog.EventDispatch.Family,
+                                    RuleMode = FrameworkRuleCatalog.EventDispatch.ModeName
                                 });
                             }
                         }
@@ -727,171 +736,7 @@ namespace Probe.Services.Analysis
                 eventSymbol.Type is INamedTypeSymbol namedType ? namedType.DelegateInvokeMethod?.Parameters.Length ?? 0 : 0);
         }
 
-        private static IEnumerable<IMethodSymbol> ResolveDelegateTargetMethods(SemanticModel semanticModel, ExpressionSyntax expression)
-        {
-            var unwrappedExpression = UnwrapExpression(expression);
 
-            if (TryResolveMethodGroupByLookup(semanticModel, unwrappedExpression, out var lookedUpMethods))
-            {
-                foreach (var method in lookedUpMethods)
-                {
-                    yield return method;
-                }
-
-                yield break;
-            }
-
-            if (semanticModel.GetOperation(unwrappedExpression) is IDelegateCreationOperation delegateCreation)
-            {
-                foreach (var method in ResolveDelegateTargetMethodsFromOperation(delegateCreation.Target))
-                {
-                    yield return method;
-                }
-
-                yield break;
-            }
-
-            if (semanticModel.GetOperation(unwrappedExpression) is IMethodReferenceOperation methodReference &&
-                methodReference.Method != null)
-            {
-                yield return methodReference.Method;
-                yield break;
-            }
-
-            if (unwrappedExpression is AnonymousFunctionExpressionSyntax anonymousFunction)
-            {
-                var anonymousSymbol = semanticModel.GetOperation(anonymousFunction) is IAnonymousFunctionOperation anonymousOperation
-                    ? anonymousOperation.Symbol
-                    : null;
-                if (anonymousSymbol != null)
-                {
-                    yield return anonymousSymbol;
-                    yield break;
-                }
-            }
-
-            var directInfo = semanticModel.GetSymbolInfo(unwrappedExpression);
-            if (directInfo.Symbol is IMethodSymbol directMethod)
-            {
-                yield return directMethod;
-                yield break;
-            }
-
-            foreach (var candidate in directInfo.CandidateSymbols.OfType<IMethodSymbol>())
-            {
-                yield return candidate;
-            }
-
-            if (unwrappedExpression is ObjectCreationExpressionSyntax creation &&
-                creation.ArgumentList is { Arguments.Count: > 0 })
-            {
-                foreach (var argument in creation.ArgumentList.Arguments)
-                {
-                    if (semanticModel.GetOperation(argument.Expression) is IMethodReferenceOperation nestedReference &&
-                        nestedReference.Method != null)
-                    {
-                        yield return nestedReference.Method;
-                        continue;
-                    }
-
-                    var argInfo = semanticModel.GetSymbolInfo(argument.Expression);
-                    if (argInfo.Symbol is IMethodSymbol method)
-                    {
-                        yield return method;
-                    }
-                    else
-                    {
-                        foreach (var candidate in argInfo.CandidateSymbols.OfType<IMethodSymbol>())
-                        {
-                            yield return candidate;
-                        }
-                    }
-                }
-            }
-        }
-
-        private static bool TryResolveMethodGroupByLookup(
-            SemanticModel semanticModel,
-            ExpressionSyntax expression,
-            out IEnumerable<IMethodSymbol> methods)
-        {
-            methods = Enumerable.Empty<IMethodSymbol>();
-            string? methodName = null;
-
-            switch (expression)
-            {
-                case IdentifierNameSyntax identifier:
-                    methodName = identifier.Identifier.ValueText;
-                    break;
-
-                case MemberAccessExpressionSyntax memberAccess when memberAccess.Expression is ThisExpressionSyntax or BaseExpressionSyntax:
-                    methodName = memberAccess.Name.Identifier.ValueText;
-                    break;
-            }
-
-            if (string.IsNullOrWhiteSpace(methodName))
-            {
-                return false;
-            }
-
-            var lookedUp = semanticModel.LookupSymbols(expression.SpanStart, name: methodName)
-                .OfType<IMethodSymbol>()
-                .ToList();
-
-            if (lookedUp.Count == 0)
-            {
-                lookedUp = ResolveMethodGroupByContainingTypeSyntax(semanticModel, expression, methodName).ToList();
-                if (lookedUp.Count == 0)
-                {
-                    return false;
-                }
-            }
-
-            methods = lookedUp;
-            return true;
-        }
-
-        private static IEnumerable<IMethodSymbol> ResolveMethodGroupByContainingTypeSyntax(
-            SemanticModel semanticModel,
-            SyntaxNode expression,
-            string methodName)
-        {
-            var containingType = expression.AncestorsAndSelf().OfType<TypeDeclarationSyntax>().FirstOrDefault();
-            if (containingType == null)
-            {
-                yield break;
-            }
-
-            foreach (var methodDeclaration in containingType.Members
-                         .OfType<MethodDeclarationSyntax>()
-                         .Where(method => string.Equals(method.Identifier.ValueText, methodName, StringComparison.Ordinal)))
-            {
-                var symbol = semanticModel.GetDeclaredSymbol(methodDeclaration);
-                if (symbol != null)
-                {
-                    yield return symbol;
-                }
-            }
-        }
-
-        private static IEnumerable<IMethodSymbol> ResolveDelegateTargetMethodsFromOperation(IOperation? operation)
-        {
-            if (operation == null)
-            {
-                yield break;
-            }
-
-            if (operation is IMethodReferenceOperation methodReference && methodReference.Method != null)
-            {
-                yield return methodReference.Method;
-                yield break;
-            }
-
-            if (operation is IAnonymousFunctionOperation anonymousFunction && anonymousFunction.Symbol != null)
-            {
-                yield return anonymousFunction.Symbol;
-            }
-        }
 
         private static IEnumerable<SyntaxNode> GetAnalysisDescendantNodes(SyntaxNode node)
         {
@@ -974,7 +819,7 @@ namespace Probe.Services.Analysis
 
         private static void ExtractLifecycleEntrypoints(IMethodSymbol method, SymbolData symbolData, ExtractionResult result)
         {
-            foreach (var entrypoint in GetLifecycleEntrypoints(method))
+            foreach (var entrypoint in LifecycleConventionExtractor.GetEntrypoints(method))
             {
                 var callerFqn = EnsureSyntheticFrameworkSymbol(
                     result,
@@ -990,103 +835,17 @@ namespace Probe.Services.Analysis
                     CallerId = callerFqn,
                     CalleeId = symbolData.Fqn,
                     CallCount = 1,
-                    CallType = entrypoint.CallType
+                    CallType = entrypoint.Rule.CallType,
+                    RuleId = entrypoint.Rule.RuleId,
+                    RuleFamily = entrypoint.Rule.Family,
+                    RuleMode = entrypoint.Rule.ModeName
                 });
             }
-        }
-
-        private static IEnumerable<FrameworkEntrypoint> GetLifecycleEntrypoints(IMethodSymbol method)
-        {
-            var methodName = method.Name;
-            var containingTypeName = method.ContainingType?.Name ?? "";
-            var containingTypeFqn = method.ContainingType?.ToDisplayString() ?? "";
-
-            if (string.Equals(methodName, "Main", StringComparison.Ordinal) ||
-                string.Equals(methodName, "MainAsync", StringComparison.Ordinal))
-            {
-                yield return new FrameworkEntrypoint(
-                    "framework::dotnet.runtime.entrypoint",
-                    "Entrypoint",
-                    "Framework.Runtime",
-                    "DotNetRuntime",
-                    "lifecycle_entrypoint");
-            }
-
-            if (string.Equals(methodName, "CreateHostBuilder", StringComparison.Ordinal) ||
-                string.Equals(methodName, "CreateWebHostBuilder", StringComparison.Ordinal))
-            {
-                yield return new FrameworkEntrypoint(
-                    $"framework::dotnet.host_builder.{methodName}",
-                    methodName,
-                    "Framework.Runtime",
-                    "DotNetHostBuilder",
-                    "lifecycle_entrypoint");
-            }
-
-            if (string.Equals(containingTypeName, "Startup", StringComparison.Ordinal) &&
-                string.Equals(methodName, "ConfigureServices", StringComparison.Ordinal))
-            {
-                yield return new FrameworkEntrypoint(
-                    "framework::aspnet.startup.ConfigureServices",
-                    "ConfigureServices",
-                    "Framework.AspNetCore",
-                    "Startup",
-                    "lifecycle_entrypoint");
-            }
-
-            if (string.Equals(containingTypeName, "Startup", StringComparison.Ordinal) &&
-                string.Equals(methodName, "Configure", StringComparison.Ordinal))
-            {
-                yield return new FrameworkEntrypoint(
-                    "framework::aspnet.startup.Configure",
-                    "Configure",
-                    "Framework.AspNetCore",
-                    "Startup",
-                    "lifecycle_entrypoint");
-            }
-
-            if (LooksLikeUiApplicationLifecycle(containingTypeName, containingTypeFqn, method))
-            {
-                yield return new FrameworkEntrypoint(
-                    $"framework::ui.lifecycle.{methodName}",
-                    methodName,
-                    "Framework.UI",
-                    "ApplicationLifecycle",
-                    "lifecycle_entrypoint");
-            }
-        }
-
-        private static bool LooksLikeUiApplicationLifecycle(string containingTypeName, string containingTypeFqn, IMethodSymbol method)
-        {
-            var lifecycleMethods = new HashSet<string>(StringComparer.Ordinal)
-            {
-                "OnStartup",
-                "OnActivated",
-                "OnLaunched",
-                "OnBackgroundActivated",
-                "OnFrameworkInitializationCompleted",
-                "OnExit",
-                "OnNavigatedTo",
-                "OnNavigatedFrom",
-                "OnAppearing",
-                "OnDisappearing",
-                "OnInitialized"
-            };
-
-            if (!lifecycleMethods.Contains(method.Name))
-            {
-                return false;
-            }
-
-            return string.Equals(containingTypeName, "App", StringComparison.Ordinal) ||
-                   IsOrDerivedFrom(method.ContainingType, "Windows.UI.Xaml.Application") ||
-                   IsOrDerivedFrom(method.ContainingType, "System.Windows.Application") ||
-                   containingTypeFqn.EndsWith(".App", StringComparison.Ordinal);
         }
 
         private static void ExtractSerializationConventionEntrypoints(IMethodSymbol method, SyntaxNode declarationNode, SymbolData symbolData, ExtractionResult result)
         {
-            foreach (var entrypoint in GetSerializationEntrypoints(method, declarationNode))
+            foreach (var entrypoint in SerializationConventionExtractor.GetEntrypoints(method, declarationNode))
             {
                 var callerFqn = EnsureSyntheticFrameworkSymbol(
                     result,
@@ -1102,150 +861,12 @@ namespace Probe.Services.Analysis
                     CallerId = callerFqn,
                     CalleeId = symbolData.Fqn,
                     CallCount = 1,
-                    CallType = entrypoint.CallType
+                    CallType = entrypoint.Rule.CallType,
+                    RuleId = entrypoint.Rule.RuleId,
+                    RuleFamily = entrypoint.Rule.Family,
+                    RuleMode = entrypoint.Rule.ModeName
                 });
             }
-        }
-
-        private static IEnumerable<FrameworkEntrypoint> GetSerializationEntrypoints(IMethodSymbol method, SyntaxNode declarationNode)
-        {
-            foreach (var callbackName in GetSerializationCallbackAttributeNames(method, declarationNode))
-            {
-                yield return new FrameworkEntrypoint(
-                    $"framework::serialization.attribute.{callbackName}",
-                    callbackName,
-                    "Framework.Serialization",
-                    "SerializerCallback",
-                    "serialization_callback");
-            }
-
-            if (LooksLikeNewtonsoftJsonConverterCallback(method))
-            {
-                yield return new FrameworkEntrypoint(
-                    $"framework::serialization.json_converter.{method.Name}",
-                    method.Name,
-                    "Framework.Serialization",
-                    "NewtonsoftJsonConverter",
-                    "serialization_callback");
-            }
-
-            if (LooksLikeContractResolverCallback(method))
-            {
-                yield return new FrameworkEntrypoint(
-                    $"framework::serialization.contract_resolver.{method.Name}",
-                    method.Name,
-                    "Framework.Serialization",
-                    "ContractResolver",
-                    "serialization_callback");
-            }
-        }
-
-        private static bool LooksLikeNewtonsoftJsonConverterCallback(IMethodSymbol method)
-        {
-            if (method.Name is not ("ReadJson" or "WriteJson" or "CanConvert" or "Read" or "Write" or "ReadAsPropertyName" or "WriteAsPropertyName"))
-            {
-                return false;
-            }
-
-            if (IsOrDerivedFrom(method.ContainingType, "Newtonsoft.Json.JsonConverter") ||
-                IsOrDerivedFrom(method.ContainingType, "Newtonsoft.Json.JsonConverter<T>") ||
-                IsOrDerivedFrom(method.ContainingType, "System.Text.Json.Serialization.JsonConverter") ||
-                IsOrDerivedFrom(method.ContainingType, "System.Text.Json.Serialization.JsonConverter<T>"))
-            {
-                return true;
-            }
-
-            var containingTypeName = method.ContainingType?.Name ?? "";
-            if (!containingTypeName.EndsWith("Converter", StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            var parameterTypes = method.Parameters
-                .Select(parameter => parameter.Type.OriginalDefinition.ToDisplayString())
-                .ToArray();
-
-            return method.Name switch
-            {
-                "ReadJson" => parameterTypes.Any(type => type.EndsWith("JsonReader", StringComparison.Ordinal)),
-                "WriteJson" => parameterTypes.Any(type => type.EndsWith("JsonWriter", StringComparison.Ordinal)),
-                "CanConvert" => parameterTypes.Any(type => string.Equals(type, "System.Type", StringComparison.Ordinal)),
-                "Read" => parameterTypes.Any(type => type.EndsWith("Utf8JsonReader", StringComparison.Ordinal)),
-                "Write" => parameterTypes.Any(type => type.EndsWith("Utf8JsonWriter", StringComparison.Ordinal)),
-                "ReadAsPropertyName" => parameterTypes.Any(type => type.EndsWith("Utf8JsonReader", StringComparison.Ordinal)),
-                "WriteAsPropertyName" => parameterTypes.Any(type => type.EndsWith("Utf8JsonWriter", StringComparison.Ordinal)),
-                _ => false
-            };
-        }
-
-        private static bool LooksLikeContractResolverCallback(IMethodSymbol method)
-        {
-            if (method.Name is not ("CreateProperty" or "CreateContract" or "CreateDictionaryContract"))
-            {
-                return false;
-            }
-
-            if (IsOrDerivedFrom(method.ContainingType, "Newtonsoft.Json.Serialization.DefaultContractResolver"))
-            {
-                return true;
-            }
-
-            var containingTypeName = method.ContainingType?.Name ?? "";
-            return containingTypeName.EndsWith("ContractResolver", StringComparison.Ordinal);
-        }
-
-        private static IEnumerable<string> GetSerializationCallbackAttributeNames(IMethodSymbol method, SyntaxNode declarationNode)
-        {
-            var names = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var attribute in method.GetAttributes())
-            {
-                var attributeName = attribute.AttributeClass?.Name ?? "";
-                if (TryNormalizeSerializationCallbackAttributeName(attributeName, out var callbackName))
-                {
-                    names.Add(callbackName);
-                }
-            }
-
-            if (declarationNode is MemberDeclarationSyntax memberDeclaration)
-            {
-                foreach (var attributeList in memberDeclaration.AttributeLists)
-                {
-                    foreach (var attribute in attributeList.Attributes)
-                    {
-                        var attributeName = attribute.Name.ToString();
-                        if (TryNormalizeSerializationCallbackAttributeName(attributeName, out var callbackName))
-                        {
-                            names.Add(callbackName);
-                        }
-                    }
-                }
-            }
-
-            return names;
-        }
-
-        private static bool TryNormalizeSerializationCallbackAttributeName(string attributeName, out string callbackName)
-        {
-            callbackName = string.Empty;
-            if (string.IsNullOrWhiteSpace(attributeName))
-            {
-                return false;
-            }
-
-            var simpleName = attributeName.Split('.').Last();
-            if (simpleName is "OnDeserializedAttribute" or "OnDeserializingAttribute" or "OnSerializedAttribute" or "OnSerializingAttribute")
-            {
-                callbackName = simpleName.Replace("Attribute", string.Empty, StringComparison.Ordinal);
-                return true;
-            }
-
-            if (simpleName is "OnDeserialized" or "OnDeserializing" or "OnSerialized" or "OnSerializing")
-            {
-                callbackName = simpleName;
-                return true;
-            }
-
-            return false;
         }
 
         private static string EnsureSyntheticFrameworkSymbol(
@@ -1264,7 +885,7 @@ namespace Probe.Services.Analysis
                     Id = GetStableHash(fqn),
                     Fqn = fqn,
                     Name = name,
-                    Kind = "framework_method",
+                    Kind = SyntheticSymbolKindCatalog.FrameworkMethod,
                     Namespace = frameworkNamespace,
                     ContainingType = containingType,
                     Accessibility = "public",
@@ -1293,8 +914,22 @@ namespace Probe.Services.Analysis
                     continue;
                 }
 
-                if (TryExtractServiceResolutionDispatch(compilationCache, semanticModel, invocation, calledMethod, symbolData, result))
+                var resolutions = ServiceDispatchExtractor.TryExtractServiceResolutionDispatch(compilationCache, semanticModel, invocation, calledMethod).ToList();
+                if (resolutions.Count > 0)
                 {
+                    foreach (var detection in resolutions)
+                    {
+                        result.MethodCalls.Add(new MethodCallData
+                        {
+                            CallerId = symbolData.Fqn,
+                            CalleeId = detection.TargetConstructorFqn,
+                            CallCount = 1,
+                            CallType = detection.CallType,
+                            RuleId = detection.RuleId,
+                            RuleFamily = detection.RuleFamily,
+                            RuleMode = detection.RuleMode
+                        });
+                    }
                     continue;
                 }
 
@@ -1303,131 +938,65 @@ namespace Probe.Services.Analysis
                     continue;
                 }
 
-                if (TryExtractMvvmToolkitMessagingDispatch(compilationCache, calledMethod, symbolData, result))
+                var mvvmResolutions = ServiceDispatchExtractor.TryExtractMvvmToolkitMessagingDispatch(compilationCache, calledMethod, symbolData).ToList();
+                if (mvvmResolutions.Count > 0)
                 {
+                    foreach (var detection in mvvmResolutions)
+                    {
+                        result.MethodCalls.Add(new MethodCallData
+                        {
+                            CallerId = symbolData.Fqn,
+                            CalleeId = detection.TargetReceiveMethodFqn,
+                            CallCount = 1,
+                            CallType = detection.CallType,
+                            RuleId = detection.RuleId,
+                            RuleFamily = detection.RuleFamily,
+                            RuleMode = detection.RuleMode
+                        });
+                    }
                     continue;
                 }
 
-                if (TryExtractAutofacModuleDispatch(compilationCache, calledMethod, symbolData, result))
+                var autofacDetection = ServiceDispatchExtractor.TryExtractAutofacModuleDispatch(compilationCache, calledMethod);
+                if (autofacDetection != null)
                 {
+                    foreach (var typeDep in autofacDetection.TypeDependencies)
+                    {
+                        result.TypeDependencies.Add(new TypeDependencyData
+                        {
+                            SourceFqn = symbolData.Fqn,
+                            TargetFqn = typeDep.TargetModuleFqn,
+                            Kind = typeDep.Kind,
+                            RuleId = typeDep.RuleId,
+                            RuleFamily = typeDep.RuleFamily,
+                            RuleMode = typeDep.RuleMode
+                        });
+                    }
+
+                    foreach (var methodCall in autofacDetection.MethodCalls)
+                    {
+                        result.MethodCalls.Add(new MethodCallData
+                        {
+                            CallerId = symbolData.Fqn,
+                            CalleeId = methodCall.TargetLoadMethodFqn,
+                            CallCount = 1,
+                            CallType = methodCall.CallType,
+                            RuleId = methodCall.RuleId,
+                            RuleFamily = methodCall.RuleFamily,
+                            RuleMode = methodCall.RuleMode
+                        });
+                    }
                     continue;
                 }
 
             }
         }
 
-        private static bool TryExtractServiceResolutionDispatch(
-            CompilationAnalysisCache compilationCache,
-            SemanticModel semanticModel,
-            InvocationExpressionSyntax invocation,
-            IMethodSymbol? calledMethod,
-            SymbolData symbolData,
-            ExtractionResult result)
-        {
-            if (!IsServiceResolutionMethod(calledMethod, invocation, out var resolutionKind))
-            {
-                return false;
-            }
 
-            var requestedTypeFqn = ResolveRequestedServiceType(semanticModel, invocation, calledMethod);
-            if (string.IsNullOrWhiteSpace(requestedTypeFqn))
-            {
-                return false;
-            }
 
-            var constructorTargets = compilationCache.ResolveServiceDispatchConstructors(requestedTypeFqn);
-            var added = false;
-            foreach (var target in constructorTargets)
-            {
-                result.MethodCalls.Add(new MethodCallData
-                {
-                    CallerId = symbolData.Fqn,
-                    CalleeId = target,
-                    CallCount = 1,
-                    CallType = resolutionKind
-                });
-                added = true;
-            }
 
-            return added;
-        }
 
-        private static bool TryExtractMvvmToolkitMessagingDispatch(
-            CompilationAnalysisCache compilationCache,
-            IMethodSymbol calledMethod,
-            SymbolData symbolData,
-            ExtractionResult result)
-        {
-            if (!IsMvvmToolkitRegisterAll(calledMethod))
-            {
-                return false;
-            }
 
-            foreach (var receiveMethod in compilationCache.GetMethodCandidates(symbolData.ContainingType ?? "", "Receive", 1))
-            {
-                result.MethodCalls.Add(new MethodCallData
-                {
-                    CallerId = symbolData.Fqn,
-                    CalleeId = receiveMethod,
-                    CallCount = 1,
-                    CallType = "mvvm_toolkit_message_dispatch"
-                });
-            }
-
-            return true;
-        }
-
-        private static bool TryExtractAutofacModuleDispatch(
-            CompilationAnalysisCache compilationCache,
-            IMethodSymbol calledMethod,
-            SymbolData symbolData,
-            ExtractionResult result)
-        {
-            if (!IsAutofacRegisterAssemblyModules(calledMethod))
-            {
-                return false;
-            }
-
-            foreach (var moduleType in compilationCache.GetAutofacModuleTypes())
-            {
-                result.TypeDependencies.Add(new TypeDependencyData
-                {
-                    SourceFqn = symbolData.Fqn,
-                    TargetFqn = moduleType,
-                    Kind = "autofac_reflection_registration"
-                });
-            }
-
-            foreach (var loadMethod in compilationCache.GetAutofacModuleLoadMethods())
-            {
-                result.MethodCalls.Add(new MethodCallData
-                {
-                    CallerId = symbolData.Fqn,
-                    CalleeId = loadMethod,
-                    CallCount = 1,
-                    CallType = "autofac_module_load"
-                });
-            }
-
-            return true;
-        }
-
-        private static bool IsMvvmToolkitRegisterAll(IMethodSymbol calledMethod)
-        {
-            var containingTypeName = calledMethod.ContainingType?.Name ?? "";
-            var containingNamespace = calledMethod.ContainingNamespace?.ToDisplayString() ?? "";
-            return string.Equals(calledMethod.Name, "RegisterAll", StringComparison.Ordinal)
-                && containingNamespace.Contains("Toolkit.Mvvm.Messaging", StringComparison.Ordinal)
-                && (containingTypeName.Contains("Messenger", StringComparison.Ordinal)
-                    || containingTypeName.Contains("Extensions", StringComparison.Ordinal));
-        }
-
-        private static bool IsAutofacRegisterAssemblyModules(IMethodSymbol calledMethod)
-        {
-            var containingNamespace = calledMethod.ContainingNamespace?.ToDisplayString() ?? "";
-            return string.Equals(calledMethod.Name, "RegisterAssemblyModules", StringComparison.Ordinal)
-                && containingNamespace.Contains("Autofac", StringComparison.Ordinal);
-        }
 
         private static bool TryExtractReflectionConstructorDispatch(
             CompilationAnalysisCache compilationCache,
@@ -1458,6 +1027,10 @@ namespace Probe.Services.Analysis
                         lookupParameterTypes,
                         out var lookupTargets))
                 {
+                    var lookupRuleMetadata = lookupTargets.Count > 1
+                        ? FrameworkRuleCatalog.ReflectionConstructorCandidate
+                        : FrameworkRuleCatalog.ReflectionConstructorDispatch;
+
                     foreach (var target in lookupTargets)
                     {
                         result.MethodCalls.Add(new MethodCallData
@@ -1465,7 +1038,10 @@ namespace Probe.Services.Analysis
                             CallerId = symbolData.Fqn,
                             CalleeId = target,
                             CallCount = 1,
-                            CallType = "reflection_constructor_dispatch"
+                            CallType = lookupRuleMetadata.CallType,
+                            RuleId = lookupRuleMetadata.RuleId,
+                            RuleFamily = lookupRuleMetadata.Family,
+                            RuleMode = lookupRuleMetadata.ModeName
                         });
                     }
 
@@ -1483,6 +1059,10 @@ namespace Probe.Services.Analysis
                     symbolData,
                     out var constructorTargets))
                 {
+                    var constructorRuleMetadata = constructorTargets.Count > 1
+                        ? FrameworkRuleCatalog.ReflectionConstructorCandidate
+                        : FrameworkRuleCatalog.ReflectionConstructorDispatch;
+
                     foreach (var target in constructorTargets)
                     {
                         result.MethodCalls.Add(new MethodCallData
@@ -1490,7 +1070,10 @@ namespace Probe.Services.Analysis
                             CallerId = symbolData.Fqn,
                             CalleeId = target,
                             CallCount = 1,
-                            CallType = "reflection_constructor_dispatch"
+                            CallType = constructorRuleMetadata.CallType,
+                            RuleId = constructorRuleMetadata.RuleId,
+                            RuleFamily = constructorRuleMetadata.Family,
+                            RuleMode = constructorRuleMetadata.ModeName
                         });
                     }
                 }
@@ -1519,6 +1102,10 @@ namespace Probe.Services.Analysis
                 return false;
             }
 
+            var activatorRuleMetadata = activatorTargets.Count > 1
+                ? FrameworkRuleCatalog.ReflectionConstructorCandidate
+                : FrameworkRuleCatalog.ReflectionConstructorDispatch;
+
             foreach (var target in activatorTargets)
             {
                 result.MethodCalls.Add(new MethodCallData
@@ -1526,7 +1113,10 @@ namespace Probe.Services.Analysis
                     CallerId = symbolData.Fqn,
                     CalleeId = target,
                     CallCount = 1,
-                    CallType = "reflection_constructor_dispatch"
+                    CallType = activatorRuleMetadata.CallType,
+                    RuleId = activatorRuleMetadata.RuleId,
+                    RuleFamily = activatorRuleMetadata.Family,
+                    RuleMode = activatorRuleMetadata.ModeName
                 });
             }
 
@@ -2067,7 +1657,7 @@ namespace Probe.Services.Analysis
                 SyntaxFactory.ParenthesizedExpression(condition));
         }
 
-        private static AnonymousFunctionExpressionSyntax? ExtractLambda(ExpressionSyntax expression)
+        internal static AnonymousFunctionExpressionSyntax? ExtractLambda(ExpressionSyntax expression)
         {
             expression = UnwrapExpression(expression);
             return expression as AnonymousFunctionExpressionSyntax;
@@ -2369,94 +1959,9 @@ namespace Probe.Services.Analysis
                    string.Equals(calledMethod.ContainingType?.ToDisplayString(), "System.Activator", StringComparison.Ordinal);
         }
 
-        private static bool IsServiceResolutionMethod(IMethodSymbol? calledMethod, InvocationExpressionSyntax invocation, out string resolutionKind)
-        {
-            resolutionKind = string.Empty;
-            var methodName = calledMethod?.Name;
-            var containingType = calledMethod?.ContainingType?.ToDisplayString() ?? string.Empty;
 
-            if ((string.Equals(methodName, "GetRequiredService", StringComparison.Ordinal) ||
-                 string.Equals(methodName, "GetService", StringComparison.Ordinal)) &&
-                (containingType.StartsWith("Microsoft.Extensions.DependencyInjection.", StringComparison.Ordinal) ||
-                 string.Equals(containingType, "System.IServiceProvider", StringComparison.Ordinal)))
-            {
-                resolutionKind = "service_provider_dispatch";
-                return true;
-            }
 
-            if (string.Equals(methodName, "Resolve", StringComparison.Ordinal) &&
-                containingType.StartsWith("Autofac.", StringComparison.Ordinal))
-            {
-                resolutionKind = "autofac_resolve_dispatch";
-                return true;
-            }
-
-            if (calledMethod == null && invocation.Expression is MemberAccessExpressionSyntax memberAccess)
-            {
-                var syntaxName = memberAccess.Name.Identifier.ValueText;
-                if (syntaxName is "GetRequiredService" or "GetService")
-                {
-                    resolutionKind = "service_provider_dispatch";
-                    return true;
-                }
-
-                if (string.Equals(syntaxName, "Resolve", StringComparison.Ordinal))
-                {
-                    resolutionKind = "autofac_resolve_dispatch";
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private static string? ResolveRequestedServiceType(
-            SemanticModel semanticModel,
-            InvocationExpressionSyntax invocation,
-            IMethodSymbol? calledMethod)
-        {
-            if (calledMethod is { IsGenericMethod: true } && calledMethod.TypeArguments.Length == 1)
-            {
-                return calledMethod.TypeArguments[0].OriginalDefinition.ToDisplayString();
-            }
-
-            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
-                memberAccess.Name is GenericNameSyntax genericName &&
-                genericName.TypeArgumentList.Arguments.Count == 1)
-            {
-                var requestedType = semanticModel.GetTypeInfo(genericName.TypeArgumentList.Arguments[0]).Type;
-                if (requestedType != null)
-                {
-                    return requestedType.OriginalDefinition.ToDisplayString();
-                }
-            }
-
-            if (invocation.Expression is GenericNameSyntax standaloneGenericName &&
-                standaloneGenericName.TypeArgumentList.Arguments.Count == 1)
-            {
-                var requestedType = semanticModel.GetTypeInfo(standaloneGenericName.TypeArgumentList.Arguments[0]).Type;
-                if (requestedType != null)
-                {
-                    return requestedType.OriginalDefinition.ToDisplayString();
-                }
-            }
-
-            if (invocation.ArgumentList.Arguments.Count == 0)
-            {
-                return null;
-            }
-
-            var firstArgument = UnwrapExpression(invocation.ArgumentList.Arguments[0].Expression);
-            if (firstArgument is TypeOfExpressionSyntax typeOfExpression)
-            {
-                var requestedType = semanticModel.GetTypeInfo(typeOfExpression.Type).Type;
-                return requestedType?.OriginalDefinition.ToDisplayString();
-            }
-
-            return null;
-        }
-
-        private static ExpressionSyntax UnwrapExpression(ExpressionSyntax expression)
+        internal static ExpressionSyntax UnwrapExpression(ExpressionSyntax expression)
         {
             while (expression is ParenthesizedExpressionSyntax parenthesized)
             {
@@ -2540,7 +2045,7 @@ namespace Probe.Services.Analysis
         {
             for (var i = 0; i < arguments.Count; i++)
             {
-                var targets = ResolveDelegateTargetMethods(semanticModel, arguments[i].Expression).ToList();
+                var targets = DelegateTargetResolver.ResolveDelegateTargetMethods(semanticModel, arguments[i].Expression).ToList();
                 if (targets.Count == 0)
                 {
                     continue;
@@ -2563,7 +2068,10 @@ namespace Probe.Services.Analysis
                         CallerId = symbolData.Fqn,
                         CalleeId = handlerFqn,
                         CallCount = 1,
-                        CallType = "delegate_reference"
+                        CallType = FrameworkRuleCatalog.DelegateReference.CallType,
+                        RuleId = FrameworkRuleCatalog.DelegateReference.RuleId,
+                        RuleFamily = FrameworkRuleCatalog.DelegateReference.Family,
+                        RuleMode = FrameworkRuleCatalog.DelegateReference.ModeName
                     });
 
                     result.MethodCalls.Add(new MethodCallData
@@ -2571,7 +2079,10 @@ namespace Probe.Services.Analysis
                         CallerId = fallbackCallerFqn,
                         CalleeId = handlerFqn,
                         CallCount = 1,
-                        CallType = "framework_delegate_dispatch"
+                        CallType = FrameworkRuleCatalog.FrameworkDelegateFallbackCandidate.CallType,
+                        RuleId = FrameworkRuleCatalog.FrameworkDelegateFallbackCandidate.RuleId,
+                        RuleFamily = FrameworkRuleCatalog.FrameworkDelegateFallbackCandidate.Family,
+                        RuleMode = FrameworkRuleCatalog.FrameworkDelegateFallbackCandidate.ModeName
                     });
                 }
             }
@@ -2735,7 +2246,7 @@ namespace Probe.Services.Analysis
                     continue;
                 }
 
-                foreach (var targetMethod in ResolveDelegateTargetMethods(semanticModel, arguments[i].Expression))
+                foreach (var targetMethod in DelegateTargetResolver.ResolveDelegateTargetMethods(semanticModel, arguments[i].Expression))
                 {
                     var handlerFqn = targetMethod.OriginalDefinition.ToDisplayString();
                     result.MethodCalls.Add(new MethodCallData
@@ -2743,7 +2254,10 @@ namespace Probe.Services.Analysis
                         CallerId = symbolData.Fqn,
                         CalleeId = handlerFqn,
                         CallCount = 1,
-                        CallType = "delegate_reference"
+                        CallType = FrameworkRuleCatalog.DelegateReference.CallType,
+                        RuleId = FrameworkRuleCatalog.DelegateReference.RuleId,
+                        RuleFamily = FrameworkRuleCatalog.DelegateReference.Family,
+                        RuleMode = FrameworkRuleCatalog.DelegateReference.ModeName
                     });
 
                     if (calleeSymbol != null &&
@@ -2754,7 +2268,10 @@ namespace Probe.Services.Analysis
                             CallerId = dispatchCaller,
                             CalleeId = handlerFqn,
                             CallCount = 1,
-                            CallType = "framework_delegate_dispatch"
+                            CallType = FrameworkRuleCatalog.FrameworkDelegateDispatch.CallType,
+                            RuleId = FrameworkRuleCatalog.FrameworkDelegateDispatch.RuleId,
+                            RuleFamily = FrameworkRuleCatalog.FrameworkDelegateDispatch.Family,
+                            RuleMode = FrameworkRuleCatalog.FrameworkDelegateDispatch.ModeName
                         });
                     }
                 }
@@ -2850,7 +2367,7 @@ namespace Probe.Services.Analysis
                 Id = GetStableHash(fqn),
                 Fqn = fqn,
                 Name = name,
-                Kind = "lambda",
+                Kind = SyntheticSymbolKindCatalog.Lambda,
                 Namespace = enclosingSymbol.ContainingNamespace?.ToDisplayString(),
                 ContainingType = enclosingSymbol.ContainingType?.ToDisplayString(),
                 Accessibility = "private",
@@ -2864,7 +2381,7 @@ namespace Probe.Services.Analysis
             };
         }
 
-        private static IMethodSymbol? ResolveCalledMethodSymbol(SymbolInfo symbolInfo)
+        internal static IMethodSymbol? ResolveCalledMethodSymbol(SymbolInfo symbolInfo)
         {
             if (symbolInfo.Symbol is IMethodSymbol methodSymbol)
             {
@@ -2926,7 +2443,7 @@ namespace Probe.Services.Analysis
                     CallerId = enclosingFqn,
                     CalleeId = call.CalleeId,
                     CallCount = call.CallCount,
-                    CallType = call.CallType == "calls" ? "lambda_dispatch" : call.CallType
+                    CallType = call.CallType == "calls" ? StructuralEdgeCatalog.LambdaDispatch : call.CallType
                 })
                 .ToList();
 
@@ -2945,7 +2462,7 @@ namespace Probe.Services.Analysis
             var reflectionTypes = new Dictionary<string, ReflectionTypeMetadata>(StringComparer.Ordinal);
             var serviceRegistrations = CloneRegistrationMap(_solutionServiceRegistrations);
             VisitNamespace(compilation.GlobalNamespace, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
-            CollectServiceRegistrations(compilation, serviceRegistrations);
+            ServiceRegistrationCollector.CollectServiceRegistrations(compilation, serviceRegistrations);
             return new CompilationAnalysisCache(dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes, serviceRegistrations);
         }
 
@@ -2957,30 +2474,7 @@ namespace Probe.Services.Analysis
                 StringComparer.Ordinal);
         }
 
-        private void CollectServiceRegistrations(Compilation compilation, Dictionary<string, HashSet<string>> serviceRegistrations)
-        {
-            foreach (var syntaxTree in compilation.SyntaxTrees)
-            {
-                var semanticModel = compilation.GetSemanticModel(syntaxTree);
-                var root = syntaxTree.GetRoot();
-                foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
-                {
-                    if (TryExtractMicrosoftDiRegistration(semanticModel, invocation, out var serviceType, out var implementationType) &&
-                        !string.IsNullOrWhiteSpace(serviceType) &&
-                        !string.IsNullOrWhiteSpace(implementationType))
-                    {
-                        AddDispatchTarget(serviceRegistrations, serviceType, implementationType);
-                    }
 
-                    if (TryExtractAutofacRegistration(semanticModel, invocation, out serviceType, out implementationType) &&
-                        !string.IsNullOrWhiteSpace(serviceType) &&
-                        !string.IsNullOrWhiteSpace(implementationType))
-                    {
-                        AddDispatchTarget(serviceRegistrations, serviceType, implementationType);
-                    }
-                }
-            }
-        }
 
         private void VisitNamespace(INamespaceSymbol ns, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
         {
@@ -3045,7 +2539,7 @@ namespace Probe.Services.Analysis
                 }
 
                 var baseFqn = method.OverriddenMethod.OriginalDefinition.ToDisplayString();
-                AddDispatchTarget(dispatchMap, baseFqn, fqn);
+                ServiceRegistrationCollector.AddDispatchTarget(dispatchMap, baseFqn, fqn);
             }
 
             foreach (var iface in type.AllInterfaces)
@@ -3058,7 +2552,7 @@ namespace Probe.Services.Analysis
                         continue;
                     }
 
-                    AddDispatchTarget(dispatchMap, interfaceMethod.OriginalDefinition.ToDisplayString(), implementation.OriginalDefinition.ToDisplayString());
+                    ServiceRegistrationCollector.AddDispatchTarget(dispatchMap, interfaceMethod.OriginalDefinition.ToDisplayString(), implementation.OriginalDefinition.ToDisplayString());
                 }
             }
         }
@@ -3100,219 +2594,7 @@ namespace Probe.Services.Analysis
                 constructors);
         }
 
-        private static bool TryExtractMicrosoftDiRegistration(
-            SemanticModel semanticModel,
-            InvocationExpressionSyntax invocation,
-            out string serviceType,
-            out string implementationType)
-        {
-            serviceType = string.Empty;
-            implementationType = string.Empty;
 
-            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess)
-            {
-                return false;
-            }
-
-            var methodName = memberAccess.Name.Identifier.ValueText;
-            if (methodName is not "AddSingleton" and not "AddScoped" and not "AddTransient")
-            {
-                return false;
-            }
-
-            if (memberAccess.Name is GenericNameSyntax genericName)
-            {
-                if (genericName.TypeArgumentList.Arguments.Count == 2)
-                {
-                    serviceType = ResolveTypeArgumentFqn(semanticModel, genericName.TypeArgumentList.Arguments[0]);
-                    implementationType = ResolveTypeArgumentFqn(semanticModel, genericName.TypeArgumentList.Arguments[1]);
-                    return !string.IsNullOrWhiteSpace(serviceType) && !string.IsNullOrWhiteSpace(implementationType);
-                }
-
-                if (genericName.TypeArgumentList.Arguments.Count == 1)
-                {
-                    serviceType = ResolveTypeArgumentFqn(semanticModel, genericName.TypeArgumentList.Arguments[0]);
-                    if (string.IsNullOrWhiteSpace(serviceType))
-                    {
-                        return false;
-                    }
-
-                    if (invocation.ArgumentList.Arguments.Count == 0)
-                    {
-                        implementationType = serviceType;
-                        return true;
-                    }
-
-                    if (TryResolveFactoryRegisteredImplementation(semanticModel, invocation.ArgumentList.Arguments[0].Expression, out implementationType))
-                    {
-                        return true;
-                    }
-
-                    return false;
-                }
-            }
-
-            if (invocation.ArgumentList.Arguments.Count != 1)
-            {
-                return false;
-            }
-
-            var registeredInstanceType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[0].Expression).Type;
-            if (registeredInstanceType == null)
-            {
-                return false;
-            }
-
-            // Existing instance registrations do not imply constructor dispatch at resolve time.
-            return false;
-        }
-
-        private static bool TryExtractAutofacRegistration(
-            SemanticModel semanticModel,
-            InvocationExpressionSyntax invocation,
-            out string serviceType,
-            out string implementationType)
-        {
-            serviceType = string.Empty;
-            implementationType = string.Empty;
-
-            var chain = FlattenInvocationChain(invocation);
-            if (chain.Count == 0 || chain[0].Expression is not MemberAccessExpressionSyntax rootMemberAccess)
-            {
-                return false;
-            }
-
-            var rootMethodName = rootMemberAccess.Name.Identifier.ValueText;
-            if (rootMethodName == "RegisterType" && rootMemberAccess.Name is GenericNameSyntax registerTypeName)
-            {
-                if (registerTypeName.TypeArgumentList.Arguments.Count != 1)
-                {
-                    return false;
-                }
-
-                implementationType = ResolveTypeArgumentFqn(semanticModel, registerTypeName.TypeArgumentList.Arguments[0]);
-                if (string.IsNullOrWhiteSpace(implementationType))
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                return false;
-            }
-
-            var serviceTypes = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var link in chain.Skip(1))
-            {
-                if (link.Expression is not MemberAccessExpressionSyntax linkMemberAccess)
-                {
-                    continue;
-                }
-
-                var linkName = linkMemberAccess.Name.Identifier.ValueText;
-                if (linkName == "As" && linkMemberAccess.Name is GenericNameSyntax asGenericName)
-                {
-                    foreach (var typeArgument in asGenericName.TypeArgumentList.Arguments)
-                    {
-                        var asType = ResolveTypeArgumentFqn(semanticModel, typeArgument);
-                        if (!string.IsNullOrWhiteSpace(asType))
-                        {
-                            serviceTypes.Add(asType);
-                        }
-                    }
-                }
-                else if (linkName == "AsSelf")
-                {
-                    serviceTypes.Add(implementationType);
-                }
-            }
-
-            if (serviceTypes.Count == 0)
-            {
-                serviceType = implementationType;
-                return true;
-            }
-
-            serviceType = serviceTypes.First();
-            return true;
-        }
-
-        private static List<InvocationExpressionSyntax> FlattenInvocationChain(InvocationExpressionSyntax invocation)
-        {
-            var chain = new List<InvocationExpressionSyntax>();
-            for (InvocationExpressionSyntax? current = invocation; current != null;)
-            {
-                chain.Add(current);
-                if (current.Expression is MemberAccessExpressionSyntax memberAccess &&
-                    memberAccess.Expression is InvocationExpressionSyntax innerInvocation)
-                {
-                    current = innerInvocation;
-                }
-                else
-                {
-                    break;
-                }
-            }
-
-            chain.Reverse();
-            return chain;
-        }
-
-        private static string ResolveTypeArgumentFqn(SemanticModel semanticModel, TypeSyntax typeSyntax)
-        {
-            return semanticModel.GetTypeInfo(typeSyntax).Type?.OriginalDefinition.ToDisplayString() ?? string.Empty;
-        }
-
-        private static bool TryResolveFactoryRegisteredImplementation(
-            SemanticModel semanticModel,
-            ExpressionSyntax expression,
-            out string implementationType)
-        {
-            implementationType = string.Empty;
-            var lambda = ExtractLambda(expression);
-            if (lambda == null)
-            {
-                return false;
-            }
-
-            ExpressionSyntax? bodyExpression = lambda.Body switch
-            {
-                ExpressionSyntax directExpression => directExpression,
-                BlockSyntax block => block.DescendantNodes().OfType<ReturnStatementSyntax>().FirstOrDefault()?.Expression,
-                _ => null
-            };
-
-            if (bodyExpression == null)
-            {
-                return false;
-            }
-
-            bodyExpression = UnwrapExpression(bodyExpression);
-            if (bodyExpression is InvocationExpressionSyntax invocation)
-            {
-                implementationType = ResolveRequestedServiceType(semanticModel, invocation, ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation))) ?? string.Empty;
-                return !string.IsNullOrWhiteSpace(implementationType);
-            }
-
-            if (bodyExpression is ObjectCreationExpressionSyntax objectCreation)
-            {
-                implementationType = semanticModel.GetTypeInfo(objectCreation).Type?.OriginalDefinition.ToDisplayString() ?? string.Empty;
-                return !string.IsNullOrWhiteSpace(implementationType);
-            }
-
-            return false;
-        }
-
-        private static void AddDispatchTarget(Dictionary<string, HashSet<string>> dispatchMap, string contractFqn, string implementationFqn)
-        {
-            if (!dispatchMap.TryGetValue(contractFqn, out var targets))
-            {
-                targets = new HashSet<string>(StringComparer.Ordinal);
-                dispatchMap[contractFqn] = targets;
-            }
-
-            targets.Add(implementationFqn);
-        }
 
         private static string BuildMethodLookupKey(string containingType, string methodName)
         {
@@ -3431,6 +2713,9 @@ namespace Probe.Services.Analysis
         public string CalleeId { get; set; } = "";
         public int CallCount { get; set; }
         public string CallType { get; set; } = "calls"; // "calls", "event_subscribe", "event_unsubscribe"
+        public string? RuleId { get; set; }
+        public string? RuleFamily { get; set; }
+        public string? RuleMode { get; set; }
     }
 
     public class FieldAccessData
@@ -3459,6 +2744,9 @@ namespace Probe.Services.Analysis
         public string SourceFqn { get; set; } = "";
         public string TargetFqn { get; set; } = "";
         public string Kind { get; set; } = "type_usage";
+        public string? RuleId { get; set; }
+        public string? RuleFamily { get; set; }
+        public string? RuleMode { get; set; }
     }
 
     public class ExtractionResult
@@ -3669,9 +2957,9 @@ namespace Probe.Services.Analysis
         bool IsPublic);
 
     internal sealed record FrameworkEntrypoint(
+        FrameworkRuleMetadata Rule,
         string FrameworkCallerFqn,
         string FrameworkCallerName,
         string FrameworkNamespace,
-        string FrameworkContainingType,
-        string CallType);
+        string FrameworkContainingType);
 }

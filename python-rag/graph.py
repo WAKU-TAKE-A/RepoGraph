@@ -167,6 +167,42 @@ class GraphLoader:
             counts[edge_type] = counts.get(edge_type, 0) + 1
         return counts
 
+    def inbound_edge_rule_family_counts(self, graph_name: str, node_id: str) -> dict[str, int]:
+        return self._edge_attribute_counts(graph_name, node_id, "in", "rule_family")
+
+    def outbound_edge_rule_family_counts(self, graph_name: str, node_id: str) -> dict[str, int]:
+        return self._edge_attribute_counts(graph_name, node_id, "out", "rule_family")
+
+    def inbound_edge_rule_id_counts(self, graph_name: str, node_id: str) -> dict[str, int]:
+        return self._edge_attribute_counts(graph_name, node_id, "in", "rule_id")
+
+    def outbound_edge_rule_id_counts(self, graph_name: str, node_id: str) -> dict[str, int]:
+        return self._edge_attribute_counts(graph_name, node_id, "out", "rule_id")
+
+    def inbound_edge_rule_mode_counts(self, graph_name: str, node_id: str) -> dict[str, int]:
+        return self._edge_attribute_counts(graph_name, node_id, "in", "rule_mode")
+
+    def outbound_edge_rule_mode_counts(self, graph_name: str, node_id: str) -> dict[str, int]:
+        return self._edge_attribute_counts(graph_name, node_id, "out", "rule_mode")
+
+    def _edge_attribute_counts(self, graph_name: str, node_id: str, direction: str, attribute_name: str) -> dict[str, int]:
+        graph = getattr(self, graph_name, None)
+        if graph is None or node_id not in graph:
+            return {}
+
+        counts: dict[str, int] = {}
+        if direction == "in":
+            edges = graph.in_edges(node_id, data=True)
+        else:
+            edges = graph.out_edges(node_id, data=True)
+
+        for _source, _target, data in edges:
+            attribute_value = str(data.get(attribute_name) or "").strip()
+            if not attribute_value:
+                continue
+            counts[attribute_value] = counts.get(attribute_value, 0) + 1
+        return counts
+
     def weighted_call_degree(self, node_id: str, direction: str) -> tuple[float, dict[str, int]]:
         if node_id not in self.call_graph:
             return 0.0, {}

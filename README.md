@@ -5,25 +5,25 @@ RepoGraph は、生成 AI が巨大な C# / .NET リポジトリを扱いやす�
 
 ## 何が分かるか
 - `Probe` が Roslyn / MSBuild を使って `symbols`、`method_calls`、`field_accesses`、`type_dependency` などを抽出します。
-- `Relay` がその出力を使って `hotspots.md`、`dead_code_candidates.md`、`dead_code_candidates.json`、RAG 用 index を生成します。
+- `Relay` がその出力を使って `hotspots.md`、`structural_isolation_candidates.md`、`structural_isolation_candidates.json`、RAG 用 index を生成します。
 - 現時点で比較的強いのは `hotspots`、`thread hazard`、`shared mutable state`、`call/type/field graph` です。
 - `hotspots` では raw の `fan-in/fan-out` に加えて、framework 由来の synthetic edge を少し割り引いた `effective fan-in/fan-out` も出します。
-- `deadcode` では、除外された候補について `Suppressed Convention Patterns` を rule ID と family 単位で見える化します。
+- `isolation` では、構造的に孤立して見える候補と `Suppressed Convention Patterns` を rule ID / family 単位で見える化します。
 - 取り切れない `XAML` / framework callback については、生成 AI の読解結果を `ai_soft_edges.json` として別レイヤー保存できます。
-- `show-deadcode --compare-ai-soft-edges` により、hard graph だけでは孤立に見える候補が AI soft edge でどれだけ抑えられるか比較できます。
+- `show-isolation --compare-ai-soft-edges` により、hard graph だけでは孤立に見える候補が AI soft edge でどれだけ抑えられるか比較できます。
 - `ai-candidates --bundle-path ...` により、`xaml / reflection / di` の難所を外部 AI に渡しやすい JSON bundle として出力できます。
 
 ## 何がまだ弱いか
-- `deadcode` は heuristic ベースで、補助的な候補列挙です。
+- `isolation` は heuristic ベースの調査入口です。
 - `related` は近い既存メソッド / クラスを探す補助機能で、project / file family / 構造の近さを見るには有効ですが万能ではありません。
 - `reflection`、`DI`、`framework convention`、一部の `dispatch` はまだ完全ではありません。
-- そのため、`deadcode` の結果は削除判断に直結させず、AI や人間の二次確認を前提にしてください。
+- そのため、`isolation` の結果は削除判断に直結させず、AI や人間の二次確認を前提にしてください。
 
 ## 構成
 1. `roslyn-cli/Probe`
    C# 製の抽出器です。`.sln` / `.csproj` を解析して SQLite と graph JSON を出力します。
 2. `python-rag`
-   Python 製の分析器です。`hotspots`、`deadcode`、`related`、`query`、`build-index` を提供します。
+   Python 製の分析器です。`hotspots`、`isolation`、`related`、`query`、`build-index`、`ai-candidates` を提供します。
 
 ## クイックスタート
 環境パスの前提は [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を参照してください。
@@ -39,9 +39,9 @@ $env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
 ```
 
-3. 必要なら dead code 候補も生成します。
+3. 必要なら構造的孤立候補も生成します。
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py deadcode --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
 ```
 
 4. 近い既存実装を探したいなら `related` を使います。
@@ -56,8 +56,8 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py re
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py files --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 30
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py symbols --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> "<name or FQN>"
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-deadcode --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-deadcode --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --compare-ai-soft-edges
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --compare-ai-soft-edges
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py graph-meta --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py xaml-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind all --limit 20
@@ -69,8 +69,8 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py sh
 - `files`: 解析済みファイル一覧の確認
 - `symbols`: 既知の型名・メソッド名から入口を探す
 - `show-hotspots`: 重要箇所の上位だけ素早く把握する
-- `show-deadcode`: 孤立候補の上位だけ素早く把握する
-- `show-deadcode --compare-ai-soft-edges`: hard graph だけだと孤立に見える候補が、AI soft edge でどれだけ抑えられるか比較する
+- `show-isolation`: 孤立候補の上位だけ素早く把握する
+- `show-isolation --compare-ai-soft-edges`: hard graph だけだと孤立に見える候補が、AI soft edge でどれだけ抑えられるか比較する
 - `graph-meta`: scan mode や出力元の確認
 - `xaml-candidates`: XAML / code-behind のうち、生成 AI に追加読解させる価値が高い箇所を絞る
 - `ai-candidates`: `xaml / reflection / di` の難所をまとめて絞る
@@ -86,10 +86,10 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py sh
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py import-ai-edges <soft_edges.json> --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
 ```
 
-4. 必要に応じて `deadcode` / `related` に opt-in で使います。
+4. 必要に応じて `isolation` / `related` に opt-in で使います。
 
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py deadcode --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py related "<known FQN or symbol>" --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
 ```
 
@@ -104,8 +104,8 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py re
 - AI にこのリポジトリを触らせるときは、最初に [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を読ませてください。
 - AI には、最初から `grep` で総当たりさせるより、まず `files` / `symbols` / `show-hotspots` を使わせる方が安定します。
 - `XAML` や framework 規約で取り切れない箇所は、`xaml-candidates` で候補を絞ってから生成 AI に読ませる運用がしやすいです。
-- `deadcode` は便利ですが主役ではありません。まずは `hotspots` と graph の精度を優先して使う想定です。
-- `deadcode` は候補を無理に減らすより、「なぜ孤立して見えるか」を説明し、追加調査をしやすくする方向で使います。
+- `isolation` は便利ですが主役ではありません。まずは `hotspots` と graph の精度を優先して使う想定です。
+- `isolation` は候補を無理に減らすより、「なぜ孤立して見えるか」を説明し、追加調査をしやすくする方向で使います。
 - フレームワーク由来の除外は、`.NET host`、`XAML/UI`、`MVVM`、`ASP.NET`、`DI`、`serialization` などの rule ID に分けて管理しています。
 - graph JSON の `graph.scan_mode` と `graph.solution_path` で、`full` / `incremental` のどちらで作られた成果物かを確認できます。
 - `incremental` は使えますが、まずは `full` を基準に信頼し、差分運用では重要箇所を再確認する前提が安全です。

@@ -67,6 +67,20 @@ namespace Probe.Services.Persistence
                 ["has_blocking_wait"] = "ALTER TABLE symbols ADD COLUMN has_blocking_wait INTEGER NOT NULL DEFAULT 0",
                 ["fan_in"] = "ALTER TABLE symbols ADD COLUMN fan_in INTEGER NOT NULL DEFAULT 0"
             });
+
+            await EnsureColumnsAsync(connection, "method_calls", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["rule_id"] = "ALTER TABLE method_calls ADD COLUMN rule_id TEXT",
+                ["rule_family"] = "ALTER TABLE method_calls ADD COLUMN rule_family TEXT",
+                ["rule_mode"] = "ALTER TABLE method_calls ADD COLUMN rule_mode TEXT"
+            });
+
+            await EnsureColumnsAsync(connection, "symbol_relationships", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["rule_id"] = "ALTER TABLE symbol_relationships ADD COLUMN rule_id TEXT",
+                ["rule_family"] = "ALTER TABLE symbol_relationships ADD COLUMN rule_family TEXT",
+                ["rule_mode"] = "ALTER TABLE symbol_relationships ADD COLUMN rule_mode TEXT"
+            });
         }
 
         private static async Task EnsureColumnsAsync(SqliteConnection connection, string tableName, IReadOnlyDictionary<string, string> migrations)
@@ -323,8 +337,8 @@ ON CONFLICT(fqn) DO UPDATE SET
             command.Transaction = transaction;
 
             command.CommandText = @"
-INSERT INTO method_calls (caller_id, callee_id, call_count, call_type)
-SELECT s1.id, s2.id, @count, @callType
+INSERT INTO method_calls (caller_id, callee_id, call_count, call_type, rule_id, rule_family, rule_mode)
+SELECT s1.id, s2.id, @count, @callType, @ruleId, @ruleFamily, @ruleMode
 FROM symbols s1, symbols s2
 WHERE s1.fqn = @callerFqn AND s2.fqn = @calleeFqn";
 
@@ -332,11 +346,14 @@ WHERE s1.fqn = @callerFqn AND s2.fqn = @calleeFqn";
             var pCallee = command.Parameters.Add("@calleeFqn", SqliteType.Text);
             var pCount = command.Parameters.Add("@count", SqliteType.Integer);
             var pCallType = command.Parameters.Add("@callType", SqliteType.Text);
+            var pRuleId = command.Parameters.Add("@ruleId", SqliteType.Text);
+            var pRuleFamily = command.Parameters.Add("@ruleFamily", SqliteType.Text);
+            var pRuleMode = command.Parameters.Add("@ruleMode", SqliteType.Text);
 
             var uniqueCalls = new HashSet<string>();
             foreach (var call in methodCalls)
             {
-                var key = $"{call.CallerId}|{call.CalleeId}|{call.CallType}";
+                var key = $"{call.CallerId}|{call.CalleeId}|{call.CallType}|{call.RuleId}|{call.RuleFamily}|{call.RuleMode}";
                 if (!uniqueCalls.Add(key))
                 {
                     continue;
@@ -345,6 +362,9 @@ WHERE s1.fqn = @callerFqn AND s2.fqn = @calleeFqn";
                 pCallee.Value = call.CalleeId;
                 pCount.Value = call.CallCount;
                 pCallType.Value = call.CallType;
+                pRuleId.Value = (object?)call.RuleId ?? DBNull.Value;
+                pRuleFamily.Value = (object?)call.RuleFamily ?? DBNull.Value;
+                pRuleMode.Value = (object?)call.RuleMode ?? DBNull.Value;
                 await command.ExecuteNonQueryAsync();
             }
             await transaction.CommitAsync();
@@ -446,8 +466,8 @@ WHERE s1.fqn = @derivedFqn AND s2.fqn = @baseFqn";
             command.Transaction = transaction;
 
             command.CommandText = @"
-INSERT INTO symbol_relationships (source_id, target_id, relationship_type)
-SELECT s1.id, s2.id, @kind
+INSERT INTO symbol_relationships (source_id, target_id, relationship_type, rule_id, rule_family, rule_mode)
+SELECT s1.id, s2.id, @kind, @ruleId, @ruleFamily, @ruleMode
 FROM symbols s1, symbols s2
 WHERE s1.fqn = @sourceFqn AND s2.fqn = @targetFqn
   AND NOT EXISTS (
@@ -456,16 +476,22 @@ WHERE s1.fqn = @sourceFqn AND s2.fqn = @targetFqn
       WHERE sr.source_id = s1.id
         AND sr.target_id = s2.id
         AND sr.relationship_type = @kind
+        AND COALESCE(sr.rule_id, '') = COALESCE(@ruleId, '')
+        AND COALESCE(sr.rule_family, '') = COALESCE(@ruleFamily, '')
+        AND COALESCE(sr.rule_mode, '') = COALESCE(@ruleMode, '')
   )";
 
             var pSource = command.Parameters.Add("@sourceFqn", SqliteType.Text);
             var pTarget = command.Parameters.Add("@targetFqn", SqliteType.Text);
             var pKind = command.Parameters.Add("@kind", SqliteType.Text);
+            var pRuleId = command.Parameters.Add("@ruleId", SqliteType.Text);
+            var pRuleFamily = command.Parameters.Add("@ruleFamily", SqliteType.Text);
+            var pRuleMode = command.Parameters.Add("@ruleMode", SqliteType.Text);
 
             var uniqueDependencies = new HashSet<string>();
             foreach (var dep in dependencies)
             {
-                var key = $"{dep.SourceFqn}|{dep.TargetFqn}|{dep.Kind}";
+                var key = $"{dep.SourceFqn}|{dep.TargetFqn}|{dep.Kind}|{dep.RuleId}|{dep.RuleFamily}|{dep.RuleMode}";
                 if (!uniqueDependencies.Add(key))
                 {
                     continue;
@@ -473,6 +499,9 @@ WHERE s1.fqn = @sourceFqn AND s2.fqn = @targetFqn
                 pSource.Value = dep.SourceFqn;
                 pTarget.Value = dep.TargetFqn;
                 pKind.Value = dep.Kind;
+                pRuleId.Value = (object?)dep.RuleId ?? DBNull.Value;
+                pRuleFamily.Value = (object?)dep.RuleFamily ?? DBNull.Value;
+                pRuleMode.Value = (object?)dep.RuleMode ?? DBNull.Value;
                 await command.ExecuteNonQueryAsync();
             }
             await transaction.CommitAsync();

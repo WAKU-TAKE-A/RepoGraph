@@ -90,7 +90,7 @@ namespace Probe.Services.Analysis
                     {
                         SourceFqn = symbolFqn,
                         TargetFqn = xClass,
-                        Kind = "xaml_codebehind"
+                        Kind = StructuralEdgeCatalog.XamlCodebehind
                     });
 
                     var clrNamespaceMappings = root.Attributes()
@@ -115,7 +115,7 @@ namespace Probe.Services.Analysis
                             {
                                 SourceFqn = symbolFqn,
                                 TargetFqn = elementTypeFqn,
-                                Kind = "xaml_type_usage"
+                                Kind = StructuralEdgeCatalog.XamlTypeUsage
                             });
                         }
 
@@ -144,7 +144,10 @@ namespace Probe.Services.Analysis
                                             CallerId = symbolFqn,
                                             CalleeId = handlerFqn,
                                             CallCount = 1,
-                                            CallType = "xaml_event"
+                                            CallType = FrameworkRuleCatalog.XamlEvent.CallType,
+                                            RuleId = FrameworkRuleCatalog.XamlEvent.RuleId,
+                                            RuleFamily = FrameworkRuleCatalog.XamlEvent.Family,
+                                            RuleMode = FrameworkRuleCatalog.XamlEvent.ModeName
                                         });
                                     }
                                 }
@@ -161,7 +164,10 @@ namespace Probe.Services.Analysis
                                             CallerId = symbolFqn,
                                             CalleeId = handlerFqn,
                                             CallCount = 1,
-                                            CallType = "xaml_action_binding"
+                                            CallType = FrameworkRuleCatalog.XamlActionBinding.CallType,
+                                            RuleId = FrameworkRuleCatalog.XamlActionBinding.RuleId,
+                                            RuleFamily = FrameworkRuleCatalog.XamlActionBinding.Family,
+                                            RuleMode = FrameworkRuleCatalog.XamlActionBinding.ModeName
                                         });
                                     }
                                 }
@@ -176,7 +182,10 @@ namespace Probe.Services.Analysis
                                     {
                                         SourceFqn = symbolFqn,
                                         TargetFqn = commandSymbol,
-                                        Kind = "xaml_command_binding"
+                                        Kind = FrameworkRuleCatalog.XamlCommandBinding.CallType,
+                                        RuleId = FrameworkRuleCatalog.XamlCommandBinding.RuleId,
+                                        RuleFamily = FrameworkRuleCatalog.XamlCommandBinding.Family,
+                                        RuleMode = FrameworkRuleCatalog.XamlCommandBinding.ModeName
                                     });
                                 }
                             }
@@ -187,7 +196,7 @@ namespace Probe.Services.Analysis
                                 {
                                     SourceFqn = symbolFqn,
                                     TargetFqn = attributeTypeFqn,
-                                    Kind = "xaml_type_usage"
+                                    Kind = StructuralEdgeCatalog.XamlTypeUsage
                                 });
                             }
 
@@ -200,7 +209,10 @@ namespace Probe.Services.Analysis
                                     {
                                         SourceFqn = symbolFqn,
                                         TargetFqn = targetClass,
-                                        Kind = "xaml_navigation"
+                                        Kind = FrameworkRuleCatalog.XamlNavigation.CallType,
+                                        RuleId = FrameworkRuleCatalog.XamlNavigation.RuleId,
+                                        RuleFamily = FrameworkRuleCatalog.XamlNavigation.Family,
+                                        RuleMode = FrameworkRuleCatalog.XamlNavigation.ModeName
                                     });
                                 }
                             }
@@ -592,7 +604,7 @@ namespace Probe.Services.Analysis
                 DocumentId = documentId,
                 Fqn = symbolFqn,
                 Name = Path.GetFileNameWithoutExtension(fullXamlPath),
-                Kind = "xaml",
+                Kind = SyntheticSymbolKindCatalog.Xaml,
                 Namespace = ns,
                 ContainingType = xClass,
                 Accessibility = "private",

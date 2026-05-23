@@ -5,6 +5,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from isolation import IsolationAnalyzer
 from deadcode import DeadCodeDetector
 from graph import GraphLoader
 from models import Base, Document, Project, Symbol
@@ -17,7 +18,7 @@ def write_empty_graph(path: Path) -> None:
     )
 
 
-class DeadCodeDetectorTests(unittest.TestCase):
+class IsolationAnalyzerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.workspace = Path(self.temp_dir.name)
@@ -31,6 +32,55 @@ class DeadCodeDetectorTests(unittest.TestCase):
             "type_dependency_graph.json",
         ):
             write_empty_graph(graphs_dir / name)
+
+        (graphs_dir / "call_graph.json").write_text(
+            """
+{
+  "directed": true,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    { "id": "App.Services.PlainUtility" },
+    { "id": "App.Services.DownstreamService.Execute()" }
+  ],
+  "links": [
+    {
+      "source": "App.Services.PlainUtility",
+      "target": "App.Services.DownstreamService.Execute()",
+      "type": "service_provider_dispatch",
+      "rule_id": "di.service_configuration",
+      "rule_family": "di",
+      "rule_mode": "hard"
+    }
+  ]
+}
+""".strip(),
+            encoding="utf-8",
+        )
+        (graphs_dir / "type_dependency_graph.json").write_text(
+            """
+{
+  "directed": true,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    { "id": "App.Services.PlainUtility" },
+    { "id": "App.Services.Dependency" }
+  ],
+  "links": [
+    {
+      "source": "App.Services.PlainUtility",
+      "target": "App.Services.Dependency",
+      "type": "type_usage",
+      "rule_id": "xaml.command_binding",
+      "rule_family": "xaml",
+      "rule_mode": "hard"
+    }
+  ]
+}
+""".strip(),
+            encoding="utf-8",
+        )
 
         self.engine = create_engine(f"sqlite:///{self.workspace / 'test.db'}")
         Base.metadata.create_all(self.engine)
@@ -545,44 +595,89 @@ class DeadCodeDetectorTests(unittest.TestCase):
         self.engine.dispose()
         self.temp_dir.cleanup()
 
-    def test_deadcode_keeps_only_generic_exclusions(self) -> None:
-        detector = DeadCodeDetector(self.session, self.graph_loader, str(self.workspace / "output" / "reports"))
+    def test_isolation_distinguishes_suppression_from_reason_labels(self) -> None:
+        detector = IsolationAnalyzer(self.session, self.graph_loader, str(self.workspace / "output" / "reports"))
 
-        candidates = detector.detect_dead_code_candidates()
-        candidate_fqns = {candidate["fqn"] for candidate in candidates}
+        candidates = detector.detect_candidates()
+        candidates_by_fqn = {candidate["fqn"]: candidate for candidate in candidates}
+        candidate_fqns = set(candidates_by_fqn)
 
         self.assertIn("App.Services.PlainUtility", candidate_fqns)
         self.assertNotIn("App.Uploaders.CustomFileUploaderService", candidate_fqns)
-        self.assertNotIn("App.Views.EditorView.OnLoaded(RoutedEventArgs)", candidate_fqns)
-        self.assertNotIn("App.Rendering.WidgetRenderer.Render(DrawingContext)", candidate_fqns)
         self.assertNotIn("App.ViewModels.MainViewModel.ActiveToolName.get", candidate_fqns)
         self.assertNotIn("App.Server.Startup.Configure(IApplicationBuilder, IWebHostEnvironment)", candidate_fqns)
         self.assertNotIn("App.Server.Middleware.CustomExceptionHandler.Invoke(HttpContext)", candidate_fqns)
         self.assertNotIn("App.Server.Controllers.IndexerApiController.Config()", candidate_fqns)
         self.assertNotIn("App.Server.Controllers.RequiresIndexer.OnActionExecuting(ActionExecutingContext)", candidate_fqns)
-        self.assertNotIn("App.ViewModels.TerminalViewModel.Receive(SettingsChangedMessage)", candidate_fqns)
-        self.assertNotIn("App.ViewModels.TerminalViewModel.Receive(KeyBindingsChangedMessage)", candidate_fqns)
-        self.assertNotIn("App.Views.TabBarBackgroundBindingHelper.BindingPathPropertyChanged(DependencyObject, DependencyPropertyChangedEventArgs)", candidate_fqns)
         self.assertNotIn("App.Views.EditorView.App.Runtime.IListener.OnKeyboardCommand(string)", candidate_fqns)
+        self.assertIn("App.Views.EditorView.OnLoaded(RoutedEventArgs)", candidate_fqns)
+        self.assertIn("App.Rendering.WidgetRenderer.Render(DrawingContext)", candidate_fqns)
+        self.assertIn("App.ViewModels.TerminalViewModel.Receive(SettingsChangedMessage)", candidate_fqns)
+        self.assertIn("App.ViewModels.TerminalViewModel.Receive(KeyBindingsChangedMessage)", candidate_fqns)
+        self.assertIn("App.Views.TabBarBackgroundBindingHelper.BindingPathPropertyChanged(DependencyObject, DependencyPropertyChangedEventArgs)", candidate_fqns)
 
-    def test_deadcode_report_includes_related_existing_implementations_section(self) -> None:
-        detector = DeadCodeDetector(self.session, self.graph_loader, str(self.workspace / "output" / "reports"))
+        self.assertTrue(any(label.startswith(("xaml.", "ui.")) for label in candidates_by_fqn["App.Views.EditorView.OnLoaded(RoutedEventArgs)"]["reason_labels"]))
+        self.assertEqual("xaml.codebehind_callback", candidates_by_fqn["App.Views.EditorView.OnLoaded(RoutedEventArgs)"]["primary_reason_label"])
+        self.assertIn("ui.lifecycle_or_render_callback", candidates_by_fqn["App.Rendering.WidgetRenderer.Render(DrawingContext)"]["reason_labels"])
+        self.assertEqual("ui.render_callback", candidates_by_fqn["App.Rendering.WidgetRenderer.Render(DrawingContext)"]["primary_reason_label"])
+        self.assertIn("mvvm.message_recipient", candidates_by_fqn["App.ViewModels.TerminalViewModel.Receive(SettingsChangedMessage)"]["reason_labels"])
+        self.assertEqual("mvvm.message_recipient", candidates_by_fqn["App.ViewModels.TerminalViewModel.Receive(SettingsChangedMessage)"]["primary_reason_label"])
+        self.assertTrue(any(label.startswith(("xaml.", "ui.")) for label in candidates_by_fqn["App.Views.TabBarBackgroundBindingHelper.BindingPathPropertyChanged(DependencyObject, DependencyPropertyChangedEventArgs)"]["reason_labels"]))
+        self.assertEqual("xaml.dependency_property_callback", candidates_by_fqn["App.Views.TabBarBackgroundBindingHelper.BindingPathPropertyChanged(DependencyObject, DependencyPropertyChangedEventArgs)"]["primary_reason_label"])
+        self.assertEqual({"di": 1}, candidates_by_fqn["App.Services.PlainUtility"]["signals"]["outbound_call_rule_families"])
+        self.assertEqual({"di.service_configuration": 1}, candidates_by_fqn["App.Services.PlainUtility"]["signals"]["outbound_call_rule_ids"])
+        self.assertEqual({"hard": 1}, candidates_by_fqn["App.Services.PlainUtility"]["signals"]["outbound_call_rule_modes"])
+        self.assertEqual({"xaml": 1}, candidates_by_fqn["App.Services.PlainUtility"]["signals"]["outbound_type_rule_families"])
+        self.assertEqual({"xaml.command_binding": 1}, candidates_by_fqn["App.Services.PlainUtility"]["signals"]["outbound_type_rule_ids"])
+        self.assertEqual({"hard": 1}, candidates_by_fqn["App.Services.PlainUtility"]["signals"]["outbound_type_rule_modes"])
+
+    def test_isolation_report_includes_related_existing_implementations_section(self) -> None:
+        detector = IsolationAnalyzer(self.session, self.graph_loader, str(self.workspace / "output" / "reports"))
 
         detector.generate_report()
 
         report = (self.workspace / "output" / "reports" / "dead_code_candidates.md").read_text(encoding="utf-8")
         json_report = (self.workspace / "output" / "reports" / "dead_code_candidates.json").read_text(encoding="utf-8")
+        structural_report = (self.workspace / "output" / "reports" / "structural_isolation_candidates.md").read_text(encoding="utf-8")
+        structural_json_report = (self.workspace / "output" / "reports" / "structural_isolation_candidates.json").read_text(encoding="utf-8")
 
+        self.assertIn("# Structural Isolation Candidates", report)
         self.assertIn("## Investigation Categories", report)
         self.assertIn("| Family | Count |", report)
-        self.assertIn("| Rank | Category | Related | LOC | Kind | Why It Looks Isolated | Symbol (FQN) | File |", report)
+        self.assertIn("## Convention Labels Kept In Candidates", report)
+        self.assertIn("| Rank | Category | Primary Label | Labels | Related | LOC | Kind | Why It Looks Isolated | Symbol (FQN) | File |", report)
         self.assertIn("## Why These Candidates Surfaced", report)
         self.assertIn("explanation facts", report)
         self.assertIn("no callers", report)
+        self.assertEqual(report, structural_report)
         self.assertIn("\"why\":", json_report)
         self.assertIn("\"signals\":", json_report)
+        self.assertIn("\"primary_reason_label\":", json_report)
+        self.assertIn("\"reason_labels\":", json_report)
         self.assertIn("\"explanation_facts\":", json_report)
         self.assertIn("\"suppressed_by_family\":", json_report)
+        self.assertIn("\"labeled_by_family\":", json_report)
+        self.assertIn("\"outbound_call_rule_families\": {", json_report)
+        self.assertIn("\"outbound_call_rule_ids\": {", json_report)
+        self.assertIn("\"outbound_call_rule_modes\": {", json_report)
+        self.assertIn("\"outbound_type_rule_families\": {", json_report)
+        self.assertIn("\"outbound_type_rule_ids\": {", json_report)
+        self.assertIn("\"outbound_type_rule_modes\": {", json_report)
+        self.assertIn("\"rule_family_summary\": {", json_report)
+        self.assertIn("\"call_outbound\": {", json_report)
+        self.assertIn("\"type_outbound\": {", json_report)
+        self.assertIn("\"di\": 1", json_report)
+        self.assertIn("\"di.service_configuration\": 1", json_report)
+        self.assertIn("\"xaml\": 1", json_report)
+        self.assertIn("\"xaml.command_binding\": 1", json_report)
+        self.assertIn("\"hard\": 1", json_report)
+        self.assertIn("\"report_kind\": \"structural_isolation_candidates\"", structural_json_report)
+        self.assertIn("framework context:", report)
+        self.assertIn("outbound calls touch di", report)
+        self.assertIn("outbound type usage touch xaml", report)
+
+    def test_deadcode_alias_points_to_isolation_analyzer(self) -> None:
+        self.assertIs(DeadCodeDetector, IsolationAnalyzer)
 
 
 if __name__ == "__main__":

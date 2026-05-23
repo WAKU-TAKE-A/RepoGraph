@@ -354,6 +354,8 @@ class HotspotScorer:
         
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump({
+                "schema_version": 1,
+                "report_kind": "hotspots",
                 "hotspots": hotspots,
                 "shared_mutable_state": shared_state,
             }, f, indent=2, default=str)

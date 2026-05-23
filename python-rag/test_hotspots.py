@@ -170,6 +170,8 @@ class HotspotScorerTests(unittest.TestCase):
         self.assertIn("## 🔴 Shared Mutable State (Runtime/Event — High Risk)", markdown)
         self.assertIn("Effective Fan-in", markdown)
         self.assertIn("App.State.Value", markdown)
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["report_kind"], "hotspots")
         self.assertEqual(len(payload["shared_mutable_state"]), 1)
         self.assertEqual(payload["shared_mutable_state"][0]["target_fqn"], "App.State.Value")
 
