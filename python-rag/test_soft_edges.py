@@ -46,6 +46,27 @@ class SoftEdgesTests(unittest.TestCase):
         self.assertEqual(["match", "123"], normalized["evidence"])
         self.assertEqual("", normalized["notes"])
 
+    def test_normalize_ai_soft_edge_invalid_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Each edge item must be an object"):
+            normalize_ai_soft_edge("not a dict")
+
+        with self.assertRaisesRegex(ValueError, "non-empty source and target"):
+            normalize_ai_soft_edge({"source": "", "target": "Demo()"})
+
+        with self.assertRaisesRegex(ValueError, "confidence must be between 0.0 and 1.0"):
+            normalize_ai_soft_edge({"source": "A", "target": "B", "confidence": 1.5})
+
+        with self.assertRaisesRegex(ValueError, "evidence must be a list"):
+            normalize_ai_soft_edge({"source": "A", "target": "B", "evidence": "not a list"})
+
+    def test_load_ai_soft_payload_invalid_edges_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload_path = Path(temp_dir) / "soft_edges.json"
+            payload_path.write_text(json.dumps({"edges": "not a list"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "must be a list or an object with an 'edges' list"):
+                load_ai_soft_payload(str(payload_path))
+
     def test_load_ai_soft_payload_supports_dict_and_utf8_bom(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             payload_path = Path(temp_dir) / "soft_edges.json"

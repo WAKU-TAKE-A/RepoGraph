@@ -380,8 +380,20 @@ class MainCliTests(unittest.TestCase):
         compare_result = self.runner.invoke(app, ["show-deadcode", "--workspace", str(self.workspace), "--compare-ai-soft-edges"])
         self.assertEqual(compare_result.exit_code, 0)
         self.assertIn("comparison:", compare_result.stdout)
-        self.assertIn("suppressed_by_ai_soft_edges=1", compare_result.stdout)
+        self.assertIn("soft_covered_by_ai=1", compare_result.stdout)
         self.assertIn("Demo.Legacy.LoadPlugin()", compare_result.stdout)
+
+        json_result = self.runner.invoke(app, ["show-isolation", "--workspace", str(self.workspace), "--compare-ai-soft-edges", "--json"])
+        self.assertEqual(json_result.exit_code, 0)
+        payload = json.loads(json_result.stdout)
+        self.assertIn("comparison", payload)
+        comp = payload["comparison"]
+        self.assertEqual(comp["comparison_kind"], "ai_soft_edge_overlay")
+        self.assertIn("optional evidence", comp["interpretation"])
+        self.assertEqual(comp["soft_covered_by_ai_count"], 1)
+        self.assertEqual(comp["suppressed_by_ai_soft_edges_count"], 1)
+        self.assertEqual(len(comp["soft_covered_by_ai"]), 1)
+        self.assertEqual(len(comp["suppressed_by_ai_soft_edges"]), 1)
 
     def test_ai_candidates_reflection_surfaces_loader_file(self) -> None:
         source_path = self.workspace / "PluginLoader.cs"

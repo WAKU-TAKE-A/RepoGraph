@@ -124,9 +124,13 @@ def show_isolation_report(
             engine.dispose()
             suppressed = sorted(hard_snapshot["candidate_fqns"] - soft_snapshot["candidate_fqns"])
             comparison_payload = {
+                "comparison_kind": "ai_soft_edge_overlay",
+                "interpretation": "AI soft edges are optional evidence; they do not prove dead code or modify the hard graph.",
                 "hard_only_count": hard_snapshot["count"],
                 "with_ai_soft_edges_count": soft_snapshot["count"],
+                "soft_covered_by_ai_count": len(suppressed),
                 "suppressed_by_ai_soft_edges_count": len(suppressed),
+                "soft_covered_by_ai": suppressed[:limit],
                 "suppressed_by_ai_soft_edges": suppressed[:limit],
                 "soft_only_suppressions": soft_snapshot["suppressed_by_ai_soft_edges"][:limit],
             }
@@ -164,11 +168,11 @@ def show_isolation_report(
             "comparison: "
             f"hard_only={comparison_payload['hard_only_count']} | "
             f"with_ai_soft_edges={comparison_payload['with_ai_soft_edges_count']} | "
-            f"suppressed_by_ai_soft_edges={comparison_payload['suppressed_by_ai_soft_edges_count']}"
+            f"soft_covered_by_ai={comparison_payload['suppressed_by_ai_soft_edges_count']}"
         )
         for item in comparison_payload["soft_only_suppressions"][:5]:
             edge_types = ", ".join(item.get("edge_types", [])[:3])
-            lines.append(f"  - soft-suppressed: {item['fqn']} | types={edge_types}")
+            lines.append(f"  - soft-covered: {item['fqn']} | types={edge_types}")
     lines.extend(format_isolation_rows(candidates))
     return "\n".join(lines)
 

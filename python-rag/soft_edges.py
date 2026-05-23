@@ -8,6 +8,9 @@ def load_json_file(path: str) -> dict:
 
 
 def normalize_ai_soft_edge(edge: dict) -> dict:
+    if not isinstance(edge, dict):
+        raise ValueError("Each edge item must be an object (dictionary).")
+
     source = str(edge.get("source", "")).strip()
     target = str(edge.get("target", "")).strip()
     edge_type = str(edge.get("type", "ai_soft_edge")).strip() or "ai_soft_edge"
