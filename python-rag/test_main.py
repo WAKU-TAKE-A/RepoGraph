@@ -317,6 +317,10 @@ class MainCliTests(unittest.TestCase):
         self.assertIn("ai_xaml_candidate_event", show_result.stdout)
         self.assertIn("Demo.Widget.ButtonClick(object, RoutedEventArgs)", show_result.stdout)
 
+        show_json_result = self.runner.invoke(app, ["show-ai-edges", "--workspace", str(self.workspace), "--json"])
+        self.assertEqual(show_json_result.exit_code, 0)
+        self.assertIn('"quality_summary"', show_json_result.stdout)
+
     def test_show_deadcode_compare_ai_soft_edges_reports_difference(self) -> None:
         self.session.add(Symbol(
             id="s3-soft",
@@ -517,13 +521,26 @@ class MainCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(bundle_path.exists())
         payload = json.loads(bundle_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["bundle_schema_version"], 1.1)
+        self.assertEqual(payload["bundle_schema_version"], 1.2)
+        self.assertIn("soft_edge_output_contract", payload)
+        self.assertIn("purpose", payload["soft_edge_output_contract"])
         self.assertEqual(payload["kind"], "reflection")
         self.assertIn("soft review targets", payload["usage_notes"])
         self.assertEqual("Confirmed by strict C# parsing rules.", payload["rule_mode_legend"]["HardEdge"])
         self.assertIn("python-rag/main.py rules --json", payload["recommended_commands"])
         self.assertTrue(payload["candidates"])
         self.assertIn("suggested_soft_edge_types", payload["candidates"][0])
+        self.assertIn("review_guidance", payload["candidates"][0])
+        self.assertIn("review_goal", payload["candidates"][0]["review_guidance"])
+        self.assertIn("context_snippets", payload["candidates"][0])
+        snippets = payload["candidates"][0].get("context_snippets", [])
+        if snippets:
+            snippet = snippets[0]
+            self.assertIn("file_path", snippet)
+            self.assertIn("line_start", snippet)
+            self.assertIn("line_end", snippet)
+            self.assertIn("reason", snippet)
+            self.assertIn("text", snippet)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from soft_edges import (
     load_ai_soft_payload,
     merge_ai_soft_payload,
     compute_isolation_snapshot,
+    summarize_ai_soft_edges,
 )
 
 
@@ -48,12 +49,36 @@ def show_ai_soft_edges(reports_dir: str, require_file: Callable[[str, str], bool
 
     payload = load_json_file(report_path)
     edges = payload.get("edges", [])
-    edges = sorted(edges, key=lambda edge: (-float(edge.get("confidence") or 0.0), edge.get("source", ""), edge.get("target", "")))[:limit]
+    quality_summary, quality_warnings = summarize_ai_soft_edges(payload)
+
+    def get_sort_confidence(e: dict) -> float:
+        c = e.get("confidence")
+        if c is None:
+            return 0.0
+        try:
+            return float(c)
+        except (ValueError, TypeError):
+            return 0.0
+
+    edges = sorted(edges, key=lambda edge: (-get_sort_confidence(edge), edge.get("source", ""), edge.get("target", "")))[:limit]
+
 
     if json_output:
-        return json.dumps({"edges": edges}, indent=2, ensure_ascii=False)
+        return json.dumps({
+            "quality_summary": quality_summary,
+            "quality_warnings": quality_warnings,
+            "edges": edges
+        }, indent=2, ensure_ascii=False)
 
     lines: list[str] = []
+    if quality_warnings:
+        lines.append(f"WARNING: {len(quality_warnings)} quality issues found in AI soft edges.")
+        for w in quality_warnings[:3]:
+            lines.append(f"  - {w}")
+        if len(quality_warnings) > 3:
+            lines.append(f"  ... and {len(quality_warnings) - 3} more warnings.")
+        lines.append("")
+
     for edge in edges:
         confidence = edge.get("confidence")
         confidence_text = f"{confidence:.2f}" if isinstance(confidence, float) else "n/a"

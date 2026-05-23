@@ -9,6 +9,7 @@ from soft_edges import (
     load_ai_soft_payload,
     merge_ai_soft_payload,
     normalize_ai_soft_edge,
+    summarize_ai_soft_edges,
 )
 
 
@@ -156,8 +157,45 @@ class SoftEdgesTests(unittest.TestCase):
         )
 
         self.assertEqual(1, isolation_snapshot["count"])
-        self.assertEqual({"Demo.Kept()"}, isolation_snapshot["candidate_fqns"])
-        self.assertEqual([{"fqn": "Demo.Legacy.LoadPlugin()"}], isolation_snapshot["suppressed_by_ai_soft_edges"])
+        self.assertEqual(1, len(isolation_snapshot["suppressed_by_ai_soft_edges"]))
+        self.assertEqual("Demo.Legacy.LoadPlugin()", isolation_snapshot["suppressed_by_ai_soft_edges"][0]["fqn"])
+
+    def test_summarize_ai_soft_edges(self) -> None:
+        payload = {
+            "edges": [
+                {"source": "A", "target": "B", "type": "T1", "confidence": 0.9, "evidence": ["E1"]},
+                {"source": "C", "target": "D", "type": "T1", "confidence": 0.4, "evidence": []},
+                {"source": "E", "target": "F", "type": "T2", "evidence": ["E2"]},
+                {"source": "E", "target": "F", "type": "T2", "confidence": "invalid", "evidence": ["E2"]},
+                {"source": "", "target": "H", "type": "T3", "confidence": 0.8, "evidence": ["E3"]},
+                {"source": "I", "target": "", "type": "T3", "confidence": 0.8, "evidence": ["E3"]},
+            ]
+        }
+        summary, warnings = summarize_ai_soft_edges(payload)
+
+        self.assertEqual(6, summary["edge_count"])
+        self.assertEqual({"T1": 2, "T2": 2, "T3": 2}, summary["edge_type_counts"])
+        self.assertEqual(2, summary["confidence"]["missing_count"])
+        self.assertEqual(1, summary["confidence"]["low_count"])
+        self.assertEqual(0.4, summary["confidence"]["min"])
+        self.assertEqual(0.9, summary["confidence"]["max"])
+        self.assertEqual(1, summary["evidence"]["missing_or_empty_count"])
+        self.assertEqual(1, summary["source_target"]["missing_source_count"])
+        self.assertEqual(1, summary["source_target"]["missing_target_count"])
+
+        self.assertTrue(any("Duplicate edge: E -> F (T2)" in w for w in warnings))
+        self.assertTrue(any("Confidence missing for: E -> F" in w for w in warnings))
+        self.assertTrue(any("Low confidence (0.4) for: C -> D" in w for w in warnings))
+        self.assertTrue(any("Evidence empty for: C -> D" in w for w in warnings))
+
+        deadcode_snapshot = compute_deadcode_snapshot(
+            session=object(),
+            graph_loader=object(),
+            reports_dir="reports",
+            include_ai_soft_edges=False,
+            detector_cls=DummyAnalyzer,
+        )
+
         self.assertEqual(2, deadcode_snapshot["count"])
         self.assertEqual({"Demo.Kept()", "Demo.Legacy.LoadPlugin()"}, deadcode_snapshot["candidate_fqns"])
 

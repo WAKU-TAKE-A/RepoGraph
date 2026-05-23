@@ -1,4 +1,4 @@
-# RepoGraph (v0.9.8.0)
+# RepoGraph (v0.9.9.0)
 
 RepoGraph は、生成 AI が巨大な C# / .NET リポジトリを扱いやすいように作った解析ツールチェーンです。
 コードを AI 向けの構造データへ変換し、AI や人間が「どこが中心か」「どこが危険か」「どこで状態が共有されているか」「既存の近い実装は何か」を掴みやすくすることを主目的にしています。
@@ -12,6 +12,8 @@ RepoGraph は、生成 AI が巨大な C# / .NET リポジトリを扱いやす�
 - 取り切れない `XAML` / framework callback については、生成 AI の読解結果を `ai_soft_edges.json` として別レイヤー保存できます。
 - `show-isolation --compare-ai-soft-edges` により、hard graph だけでは孤立に見える候補が AI soft edge でどれだけ抑えられるか比較できます。
 - `ai-candidates --bundle-path ...` により、`xaml / reflection / di` の難所を外部 AI に渡しやすい JSON bundle として出力できます。
+- `ai-candidates` bundle には `review_guidance`、`context_snippets`、`soft_edge_output_contract` が入り、AI が soft edge を返してよい条件を確認しやすくなっています。
+- `show-ai-edges --json` は `quality_summary` / `quality_warnings` を出し、import 済み AI soft edge の品質を hard graph と混ぜずに確認できます。
 
 ## 何がまだ弱いか
 - `isolation` は heuristic ベースの調査入口です。
@@ -63,6 +65,7 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py xa
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind all --limit 20
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --bundle-path C:\tmp\candidate_bundle.json
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20 --json
 ```
 
 用途:
@@ -76,17 +79,25 @@ C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py sh
 - `ai-candidates`: `xaml / reflection / di` の難所をまとめて絞る
 - `ai-candidates --bundle-path ...`: 外部 AI に渡しやすい prompt-ready JSON bundle を保存する
 - `show-ai-edges`: 取り込んだ AI 補助 edge を確認する
+- `show-ai-edges --json`: AI 補助 edge の `quality_summary` / `quality_warnings` を確認する
 
 ## AI Soft Edge の流れ
 1. `xaml-candidates` または `ai-candidates --kind xaml|reflection|di` で AI に読ませる候補を絞ります。
-2. 生成 AI が `source`, `target`, `type`, `confidence`, `evidence` を持つ JSON を作ります。
-3. RepoGraph に取り込みます。
+2. `ai-candidates --bundle-path ...` で `review_guidance` と `context_snippets` 付きの bundle を作り、生成 AI に渡します。
+3. 生成 AI が `source`, `target`, `type`, `confidence`, `evidence` を持つ JSON を作ります。
+4. RepoGraph に取り込みます。
 
 ```powershell
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py import-ai-edges <soft_edges.json> --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
 ```
 
-4. 必要に応じて `isolation` / `related` に opt-in で使います。
+5. 取り込んだ edge の品質を確認します。
+
+```powershell
+C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --json
+```
+
+6. 必要に応じて `isolation` / `related` に opt-in で使います。
 
 ```powershell
 C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges

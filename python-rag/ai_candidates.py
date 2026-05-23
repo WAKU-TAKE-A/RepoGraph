@@ -67,6 +67,97 @@ def read_text_file(path: str) -> str:
         return ""
 
 
+def extract_snippet(file_path: str, search_text: str | None = None, line_number: int | None = None, reason: str = "", context_lines: int = 4) -> dict | None:
+    text = read_text_file(file_path)
+    if not text:
+        return None
+    lines = text.split("\n")
+    if not lines:
+        return None
+    
+    target_idx = 0
+    if line_number is not None and line_number > 0:
+        target_idx = min(len(lines) - 1, line_number - 1)
+    elif search_text:
+        for idx, line in enumerate(lines):
+            if search_text in line:
+                target_idx = idx
+                break
+                
+    start_idx = max(0, target_idx - context_lines)
+    end_idx = min(len(lines), target_idx + context_lines + 1)
+    
+    while start_idx < end_idx and not lines[start_idx].strip():
+        start_idx += 1
+    while end_idx > start_idx and not lines[end_idx - 1].strip():
+        end_idx -= 1
+        
+    if start_idx >= end_idx:
+        return None
+        
+    return {
+        "file_path": file_path,
+        "line_start": start_idx + 1,
+        "line_end": end_idx,
+        "reason": reason,
+        "text": "\n".join(lines[start_idx:end_idx])
+    }
+
+
+def extract_focal_snippet(file_path: str, focal_symbol: Symbol, context_lines: int = 4) -> dict | None:
+    text = read_text_file(file_path)
+    if not text:
+        return None
+    lines = text.split("\n")
+    if not lines:
+        return None
+
+    target_idx = -1
+    base_idx = max(0, min(len(lines) - 1, (focal_symbol.line_start or 1) - 1))
+    
+    name = focal_symbol.name or ""
+    if name == ".ctor":
+        containing = focal_symbol.containing_type or ""
+        name = containing.split(".")[-1]
+    elif name.startswith("get_") or name.startswith("set_"):
+        name = name[4:]
+        
+    target_idx = -1
+    
+    if name in lines[base_idx]:
+        target_idx = base_idx
+    else:
+        for offset in range(1, 51):
+            if base_idx + offset < len(lines) and name in lines[base_idx + offset]:
+                target_idx = base_idx + offset
+                break
+            if base_idx - offset >= 0 and name in lines[base_idx - offset]:
+                target_idx = base_idx - offset
+                break
+            
+    if target_idx == -1:
+        return None
+        
+    start_idx = max(0, target_idx - context_lines)
+    end_idx = min(len(lines), target_idx + context_lines + 1)
+    
+    while start_idx < end_idx and not lines[start_idx].strip():
+        start_idx += 1
+    while end_idx > start_idx and not lines[end_idx - 1].strip():
+        end_idx -= 1
+        
+    if start_idx >= end_idx:
+        return None
+        
+    return {
+        "file_path": file_path,
+        "line_start": start_idx + 1,
+        "line_end": end_idx,
+        "reason": f"Focal symbol: {focal_symbol.name}",
+        "text": "\n".join(lines[start_idx:end_idx])
+    }
+
+
 def count_outbound_edge_types(graph, node_ids: list[str], edge_types: set[str]) -> int:
     count = 0
     for node_id in node_ids:
@@ -156,6 +247,7 @@ def build_xaml_candidates(session, graph_loader, limit: int, include_context: bo
                 "fqn": method_symbol.fqn,
                 "file_path": method_document.file_path if method_document else None,
                 "loc": method_symbol.loc,
+                "line_start": method_symbol.line_start,
             })
 
         reasons = []
@@ -177,6 +269,21 @@ def build_xaml_candidates(session, graph_loader, limit: int, include_context: bo
         if score == 0:
             continue
 
+        snippets = []
+        if file_path:
+            snippet = extract_snippet(file_path, search_text="x:Class", reason="XAML definition", context_lines=5)
+            if not snippet:
+                snippet = extract_snippet(file_path, line_number=1, reason="XAML definition start", context_lines=5)
+            if snippet:
+                snippets.append(snippet)
+        
+        if weak_handlers:
+            handler = weak_handlers[0]
+            if handler.get("file_path"):
+                h_snippet = extract_snippet(handler["file_path"], line_number=handler.get("line_start"), reason="First disconnected handler", context_lines=4)
+                if h_snippet:
+                    snippets.append(h_snippet)
+
         item = {
             "candidate_kind": "xaml",
             "xaml_fqn": xaml_fqn,
@@ -188,6 +295,7 @@ def build_xaml_candidates(session, graph_loader, limit: int, include_context: bo
             "weak_handlers": weak_handlers[:10],
             "reasons": reasons,
             "score": score,
+            "context_snippets": snippets,
         }
         if include_context:
             item["context_files"] = unique_paths([file_path] + [handler["file_path"] for handler in weak_handlers[:10]])
@@ -245,6 +353,19 @@ def build_non_xaml_ai_candidates(session, graph_loader, kind: str, limit: int) -
             reasons.append(f"{isolated_count} focal symbol(s) still have fan_in=0")
             score += min(isolated_count, 3)
 
+        snippets = []
+        if pattern_hits:
+            marker = pattern_hits[0]
+            snippet = extract_snippet(file_path, search_text=marker, reason=f"Found marker '{marker}'", context_lines=5)
+            if snippet:
+                snippets.append(snippet)
+        
+        if focal_symbols and len(snippets) < 2:
+            focal = focal_symbols[0]
+            f_snippet = extract_focal_snippet(file_path, focal, context_lines=4)
+            if f_snippet:
+                snippets.append(f_snippet)
+
         payload.append({
             "candidate_kind": kind,
             "project": project_row.name,
@@ -254,6 +375,7 @@ def build_non_xaml_ai_candidates(session, graph_loader, kind: str, limit: int) -
             "hard_edge_count": hard_edge_count,
             "reasons": reasons,
             "score": score,
+            "context_snippets": snippets,
             "suggested_soft_edge_types": AI_CANDIDATE_EDGE_HINTS[kind],
             "focal_symbols": [
                 {
@@ -285,8 +407,35 @@ def build_ai_candidates(session, graph_loader, kind: str, limit: int) -> list[di
 
 
 def build_ai_candidate_bundle(workspace: str | None, kind: str, payload: list[dict]) -> dict:
+    for item in payload:
+        candidate_kind = item.get("candidate_kind")
+        if candidate_kind == "xaml":
+            item["review_guidance"] = {
+                "review_goal": "Identify if the XAML file correctly wires up the disconnected handlers or commands.",
+                "evidence_checklist": ["XAML x:Class", "event/action/command binding", "code-behind handler", "runtime hookup"],
+                "do_not_create_soft_edge_when": "The evidence is completely missing or the XAML file is definitively unused.",
+                "suggested_source_fields": ["xaml_fqn"],
+                "suggested_target_fields": ["weak_handlers FQNs"]
+            }
+        elif candidate_kind == "reflection":
+            item["review_guidance"] = {
+                "review_goal": "Identify the target types or methods invoked via reflection.",
+                "evidence_checklist": ["Activator.CreateInstance", "assembly load", "type discovery", "constructor/method invocation", "target type resolution"],
+                "do_not_create_soft_edge_when": "The reflection target is completely dynamic (e.g. user input) and cannot be statically bounded.",
+                "suggested_source_fields": ["context_symbols FQNs"],
+                "suggested_target_fields": ["The discovered target FQNs"]
+            }
+        elif candidate_kind == "di":
+            item["review_guidance"] = {
+                "review_goal": "Identify the service implementations mapped to interfaces.",
+                "evidence_checklist": ["registration", "resolve call", "container module", "service interface to implementation relation"],
+                "do_not_create_soft_edge_when": "The resolution is too ambiguous or the dependency injection framework dialect is unrecognizable.",
+                "suggested_source_fields": ["context_symbols FQNs"],
+                "suggested_target_fields": ["The injected implementation FQNs"]
+            }
+
     return {
-        "bundle_schema_version": 1.1,
+        "bundle_schema_version": 1.2,
         "generated_at": utc_timestamp(),
         "workspace": workspace,
         "kind": kind,
@@ -295,6 +444,14 @@ def build_ai_candidate_bundle(workspace: str | None, kind: str, payload: list[di
             "They indicate areas where the hard graph may be incomplete. "
             "Prefer returning ai_soft_edges.json entries only when you can explain the evidence."
         ),
+        "soft_edge_output_contract": {
+            "purpose": "Soft edges represent heuristic or AI-inferred relationships. They are NOT hard graph edges.",
+            "required_fields": ["source", "target", "type", "confidence", "evidence"],
+            "constraints": [
+                "If evidence cannot be clearly explained, DO NOT return a soft edge.",
+                "Ambiguous cases should be left as candidates."
+            ]
+        },
         "rule_mode_legend": {
             "HardEdge": "Confirmed by strict C# parsing rules.",
             "Candidate": "Heuristically flagged as suspicious but unconfirmed. Requires AI or manual review."

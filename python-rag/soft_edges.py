@@ -91,3 +91,78 @@ def compute_deadcode_snapshot(session: Any, graph_loader: Any, reports_dir: str,
         include_ai_soft_edges=include_ai_soft_edges,
         analyzer_cls=detector_cls,
     )
+
+
+def summarize_ai_soft_edges(payload_or_edges: dict | list) -> tuple[dict, list[str]]:
+    edges = payload_or_edges.get("edges", []) if isinstance(payload_or_edges, dict) else payload_or_edges
+    if not isinstance(edges, list):
+        edges = []
+
+    summary = {
+        "edge_count": len(edges),
+        "edge_type_counts": {},
+        "confidence": {
+            "missing_count": 0,
+            "low_count": 0,
+            "min": None,
+            "max": None,
+        },
+        "evidence": {
+            "missing_or_empty_count": 0,
+        },
+        "source_target": {
+            "missing_source_count": 0,
+            "missing_target_count": 0,
+        }
+    }
+
+    warnings = []
+    seen = set()
+    confidences = []
+
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+            
+        source = str(edge.get("source", "")).strip()
+        target = str(edge.get("target", "")).strip()
+        edge_type = str(edge.get("type", "")).strip()
+        
+        if not source:
+            summary["source_target"]["missing_source_count"] += 1
+        if not target:
+            summary["source_target"]["missing_target_count"] += 1
+            
+        edge_type_key = edge_type or "ai_soft_edge"
+        summary["edge_type_counts"][edge_type_key] = summary["edge_type_counts"].get(edge_type_key, 0) + 1
+
+        key = (source, target, edge_type_key)
+        if key in seen:
+            warnings.append(f"Duplicate edge: {source} -> {target} ({edge_type_key})")
+        seen.add(key)
+
+        confidence = edge.get("confidence")
+        if confidence is None:
+            summary["confidence"]["missing_count"] += 1
+            warnings.append(f"Confidence missing for: {source} -> {target}")
+        else:
+            try:
+                c = float(confidence)
+                confidences.append(c)
+                if c < 0.5:
+                    summary["confidence"]["low_count"] += 1
+                    warnings.append(f"Low confidence ({c}) for: {source} -> {target}")
+            except (ValueError, TypeError):
+                summary["confidence"]["missing_count"] += 1
+
+        evidence = edge.get("evidence", [])
+        if not evidence:
+            summary["evidence"]["missing_or_empty_count"] += 1
+            warnings.append(f"Evidence empty for: {source} -> {target}")
+
+    if confidences:
+        summary["confidence"]["min"] = min(confidences)
+        summary["confidence"]["max"] = max(confidences)
+
+    return summary, warnings
+
