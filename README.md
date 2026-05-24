@@ -1,125 +1,140 @@
 # RepoGraph (v0.9.9.0)
 
-RepoGraph は、生成 AI が巨大な C# / .NET リポジトリを扱いやすいように作った解析ツールチェーンです。
-コードを AI 向けの構造データへ変換し、AI や人間が「どこが中心か」「どこが危険か」「どこで状態が共有されているか」「既存の近い実装は何か」を掴みやすくすることを主目的にしています。
+RepoGraph は、巨大な C# / .NET リポジトリを生成 AI が探索しやすくするための解析ツールです。
 
-## 何が分かるか
-- `Probe` が Roslyn / MSBuild を使って `symbols`、`method_calls`、`field_accesses`、`type_dependency` などを抽出します。
-- `Relay` がその出力を使って `hotspots.md`、`structural_isolation_candidates.md`、`structural_isolation_candidates.json`、RAG 用 index を生成します。
-- 現時点で比較的強いのは `hotspots`、`thread hazard`、`shared mutable state`、`call/type/field graph` です。
-- `hotspots` では raw の `fan-in/fan-out` に加えて、framework 由来の synthetic edge を少し割り引いた `effective fan-in/fan-out` も出します。
-- `isolation` では、構造的に孤立して見える候補と `Suppressed Convention Patterns` を rule ID / family 単位で見える化します。
-- 取り切れない `XAML` / framework callback については、生成 AI の読解結果を `ai_soft_edges.json` として別レイヤー保存できます。
-- `show-isolation --compare-ai-soft-edges` により、hard graph だけでは孤立に見える候補が AI soft edge でどれだけ抑えられるか比較できます。
-- `ai-candidates --bundle-path ...` により、`xaml / reflection / di` の難所を外部 AI に渡しやすい JSON bundle として出力できます。
-- `ai-candidates` bundle には `review_guidance`、`context_snippets`、`soft_edge_output_contract` が入り、AI が soft edge を返してよい条件を確認しやすくなっています。
-- `show-ai-edges --json` は `quality_summary` / `quality_warnings` を出し、import 済み AI soft edge の品質を hard graph と混ぜずに確認できます。
+基本原則:
+RepoGraph は「答えを出すツール」ではなく、「AI が質問を立てるためのツール」です。
+AI は自分でファイルを読めます。RepoGraph の役割は、巨大リポジトリで AI が迷子にならないための地図を提供することに限定します。
 
-## 何がまだ弱いか
-- `isolation` は heuristic ベースの調査入口です。
-- `related` は近い既存メソッド / クラスを探す補助機能で、project / file family / 構造の近さを見るには有効ですが万能ではありません。
-- `reflection`、`DI`、`framework convention`、一部の `dispatch` はまだ完全ではありません。
-- そのため、`isolation` の結果は削除判断に直結させず、AI や人間の二次確認を前提にしてください。
+## 何をするツールか
 
-## 構成
-1. `roslyn-cli/Probe`
-   C# 製の抽出器です。`.sln` / `.csproj` を解析して SQLite と graph JSON を出力します。
-2. `python-rag`
-   Python 製の分析器です。`hotspots`、`isolation`、`related`、`query`、`build-index`、`ai-candidates` を提供します。
+- `Probe` が Roslyn / MSBuild で `.sln` / `.csproj` を解析し、構造データを出力します。
+- `python-rag` がその出力を使い、`hotspots`、`isolation`、`related`、`ai-candidates` などの調査入口を作ります。
+- `ai_soft_edges.json` を別レイヤーとして扱い、XAML / reflection / DI のような hard graph で取り切れない難所を AI 補助で扱えます。
+
+RepoGraph は、次のような用途に向いています。
+
+- 巨大なレガシーコードの初期把握
+- どこから読むべきかの優先順位付け
+- shared mutable state や UI / background thread 混在箇所の抽出
+- XAML / reflection / DI のような難所の候補化
+- AI に raw `grep` 前の地図を渡すこと
+
+## 通常利用時のファイル構成
+
+通常利用では、次のような配置を想定します。
+
+```text
+RepoGraph/
+  probe/
+    Probe.exe
+    Probe.dll
+    Probe.runtimeconfig.json
+    Probe.deps.json
+    rules/
+      framework_rules.json
+    BuildHost-net472/
+    BuildHost-netcore/
+    runtimes/
+    *.dll
+
+  python-rag/
+    main.py
+    *.py
+
+  analysis_workspace/
+  README.md
+  AI_INSTRUCTIONS.md
+  LICENSE
+```
+
+重要:
+
+- `Probe.exe` 単体では足りません。`probe/` 配下の一式が必要です。
+- 通常利用は `probe/Probe.exe` 配布レイアウトを前提にします。開発時だけ `roslyn-cli/Probe` と `dotnet build/run` を使います。
+- `analysis_workspace/` は解析結果の出力先です。
+- `README.md` は人間向け、`AI_INSTRUCTIONS.md` は通常利用時に AI へ見せるための文書です。
+- RepoGraph 本体を改造する場合は [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を参照してください。
+
+## 必要環境
+
+- Python 実行環境
+- `probe/` 配下の配布物一式
+- 解析対象プロジェクトを Roslyn / MSBuild で解決するための環境
+
+最後の項目は対象リポジトリ次第です。現実には次のいずれかが必要になることがあります。
+
+- .NET SDK
+- Visual Studio Build Tools
+- .NET Framework Developer Pack / targeting pack
+- 対象ソリューション固有の workload
+
+つまり、RepoGraph 本体は zip 配布しやすいですが、対象リポジトリを解析できるかは対象側のビルド環境にも依存します。
 
 ## クイックスタート
-環境パスの前提は [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を参照してください。
 
-1. 解析を実行します。
+1. `Probe.exe` で構造データを作ります。
+
 ```powershell
-$env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
-& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" run --project C:\tmp\RepoGraph\roslyn-cli\Probe\Probe.csproj -- scan <TARGET_SLN_OR_CSPROJ> --output C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+.\probe\Probe.exe scan <TARGET_SLN_OR_CSPROJ> --output .\analysis_workspace\<workspace_name>
 ```
 
-2. ホットスポットを生成します。
+2. `hotspots` を作ります。
+
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+python .\python-rag\main.py hotspots --workspace .\analysis_workspace\<workspace_name>
 ```
 
-3. 必要なら構造的孤立候補も生成します。
+3. 必要なら `isolation` を作ります。
+
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+python .\python-rag\main.py isolation --workspace .\analysis_workspace\<workspace_name>
 ```
 
 4. 近い既存実装を探したいなら `related` を使います。
+
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py related "<known FQN or symbol>" --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+python .\python-rag\main.py related "<known FQN or symbol>" --workspace .\analysis_workspace\<workspace_name>
 ```
 
 ## まず使う軽量コマンド
-`grep` に行く前に、まず RepoGraph の軽量コマンドで地図を確認する想定です。
+
+AI に最初から raw `grep` をさせるのではなく、まず RepoGraph の軽量コマンドで地図を確認する想定です。
 
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py files --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 30
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py symbols --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> "<name or FQN>"
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --compare-ai-soft-edges
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py graph-meta --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py xaml-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind all --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --bundle-path C:\tmp\candidate_bundle.json
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20 --json
+python .\python-rag\main.py files --workspace .\analysis_workspace\<workspace_name> --limit 30
+python .\python-rag\main.py symbols --workspace .\analysis_workspace\<workspace_name> "<name or FQN>"
+python .\python-rag\main.py show-hotspots --workspace .\analysis_workspace\<workspace_name> --limit 20
+python .\python-rag\main.py show-isolation --workspace .\analysis_workspace\<workspace_name> --limit 20
+python .\python-rag\main.py show-isolation --workspace .\analysis_workspace\<workspace_name> --compare-ai-soft-edges
+python .\python-rag\main.py graph-meta --workspace .\analysis_workspace\<workspace_name>
+python .\python-rag\main.py xaml-candidates --workspace .\analysis_workspace\<workspace_name> --limit 20
+python .\python-rag\main.py ai-candidates --workspace .\analysis_workspace\<workspace_name> --kind all --limit 20
+python .\python-rag\main.py show-ai-edges --workspace .\analysis_workspace\<workspace_name> --limit 20 --json
 ```
 
-用途:
-- `files`: 解析済みファイル一覧の確認
-- `symbols`: 既知の型名・メソッド名から入口を探す
-- `show-hotspots`: 重要箇所の上位だけ素早く把握する
-- `show-isolation`: 孤立候補の上位だけ素早く把握する
-- `show-isolation --compare-ai-soft-edges`: hard graph だけだと孤立に見える候補が、AI soft edge でどれだけ抑えられるか比較する
-- `graph-meta`: scan mode や出力元の確認
-- `xaml-candidates`: XAML / code-behind のうち、生成 AI に追加読解させる価値が高い箇所を絞る
-- `ai-candidates`: `xaml / reflection / di` の難所をまとめて絞る
-- `ai-candidates --bundle-path ...`: 外部 AI に渡しやすい prompt-ready JSON bundle を保存する
-- `show-ai-edges`: 取り込んだ AI 補助 edge を確認する
-- `show-ai-edges --json`: AI 補助 edge の `quality_summary` / `quality_warnings` を確認する
+## AI soft edge の流れ
 
-## AI Soft Edge の流れ
-1. `xaml-candidates` または `ai-candidates --kind xaml|reflection|di` で AI に読ませる候補を絞ります。
-2. `ai-candidates --bundle-path ...` で `review_guidance` と `context_snippets` 付きの bundle を作り、生成 AI に渡します。
-3. 生成 AI が `source`, `target`, `type`, `confidence`, `evidence` を持つ JSON を作ります。
-4. RepoGraph に取り込みます。
+1. `xaml-candidates` または `ai-candidates --kind xaml|reflection|di` で候補を絞ります。
+2. `ai-candidates --bundle-path ...` で AI に渡す JSON bundle を作ります。
+3. AI が `ai_soft_edges.json` を返します。
+4. `import-ai-edges` で取り込みます。
+5. `show-ai-edges --json` で品質を確認します。
+6. 必要に応じて `isolation` / `related` に opt-in で重ねます。
 
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py import-ai-edges <soft_edges.json> --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-```
+## 通常利用時の注意
 
-5. 取り込んだ edge の品質を確認します。
+- `isolation` は最終判定ではなく、調査入口です。
+- `hotspots` や graph の方が主役です。
+- `reflection`、`DI`、`framework convention`、`dispatch` はまだ完全ではありません。
+- `ai_soft_edges.json` は hard graph に混ぜず、別レイヤーとして扱う前提です。
 
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --json
-```
+## AI に使わせる場合
 
-6. 必要に応じて `isolation` / `related` に opt-in で使います。
+通常利用では、人間はまずこの `README.md` を読み、AI には `README.md` と [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を見せてください。
 
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py related "<known FQN or symbol>" --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
-```
-
-## 使いどころ
-- 巨大なレガシーコードの初期把握
-- 構造的に危険なクラスやメソッドの優先順位付け
-- 共有可変状態や UI / background thread 混在箇所の抽出
-- 既存の近い実装や類似ファミリーの探索
-- AI に探索の足場を与えるための前処理
-
-## 運用メモ
-- AI にこのリポジトリを触らせるときは、最初に [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を読ませてください。
-- AI には、最初から `grep` で総当たりさせるより、まず `files` / `symbols` / `show-hotspots` を使わせる方が安定します。
-- `XAML` や framework 規約で取り切れない箇所は、`xaml-candidates` で候補を絞ってから生成 AI に読ませる運用がしやすいです。
-- `isolation` は便利ですが主役ではありません。まずは `hotspots` と graph の精度を優先して使う想定です。
-- `isolation` は候補を無理に減らすより、「なぜ孤立して見えるか」を説明し、追加調査をしやすくする方向で使います。
-- フレームワーク由来の除外は、`.NET host`、`XAML/UI`、`MVVM`、`ASP.NET`、`DI`、`serialization` などの rule ID に分けて管理しています。
-- graph JSON の `graph.scan_mode` と `graph.solution_path` で、`full` / `incremental` のどちらで作られた成果物かを確認できます。
-- `incremental` は使えますが、まずは `full` を基準に信頼し、差分運用では重要箇所を再確認する前提が安全です。
+`AI_INSTRUCTIONS.md` は通常利用向けです。RepoGraph 本体を改造する AI には [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を使ってください。
 
 ## License
+
 [MIT License](LICENSE)

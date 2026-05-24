@@ -1,201 +1,165 @@
 # RepoGraph: Instructions for AI Agent
 
 ## 1. Role
-You are analyzing a C# / .NET repository with RepoGraph.
-RepoGraph is designed to make large repositories easier for AI to navigate.
-Treat `hotspots`, structural graphs, and related-symbol search as primary evidence.
-Treat `isolation` as a secondary, heuristic investigation aid that always requires follow-up verification.
-When `isolation` suppresses framework-driven symbols, check the reported rule IDs to understand whether the suppression came from .NET hosting, XAML/UI, MVVM, ASP.NET, DI, or serialization conventions.
-When reading `hotspots`, prefer `effective fan-in/fan-out` for prioritization and keep raw `fan-in/fan-out` as supporting context.
 
-## 2. Environment
-Use these exact paths when running commands:
+You are using RepoGraph as a map for exploring a large C# / .NET repository.
 
-- `.NET SDK`
-  `$env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"`
-  `& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe"`
-- `Python`
-  `C:\tmp\RepoGraph\.venv\Scripts\python.exe`
-- `RepoGraph root`
-  `C:\tmp\RepoGraph`
+RepoGraph is not a verdict engine.
+RepoGraph is a navigation aid that helps you decide what to read next.
 
-## 3. Primary Workflow
+Treat these as primary:
 
-### 3.0 AI Soft Edge Investigation
-For detailed steps on how to investigate candidates, export bundles, and create/import `ai_soft_edges.json`, please strictly follow the runbook:
-[CHECKPOINT8_OPERATIONAL_WORKFLOW.md](plan/CHECKPOINT8_OPERATIONAL_WORKFLOW.md)
+- `files`
+- `symbols`
+- `show-hotspots`
+- graph JSON
+- `related`
 
-### 3.1 Navigation Before Grep
-Do not jump to raw `grep` first.
-Use RepoGraph's light navigation commands first so you start from analyzed structure instead of raw text.
+Treat these as secondary:
 
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py files --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 30
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py symbols --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> "<name or FQN>"
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --compare-ai-soft-edges
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py graph-meta --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py xaml-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind all --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --bundle-path C:\tmp\candidate_bundle.json
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20 --json
+- `show-isolation`
+- `xaml-candidates`
+- `ai-candidates`
+- `show-ai-edges`
+
+## 2. Expected Layout
+
+Assume a normal distribution layout like this:
+
+```text
+RepoGraph/
+  probe/
+    Probe.exe
+    Probe.dll
+    Probe.runtimeconfig.json
+    Probe.deps.json
+    rules/
+    BuildHost-net472/
+    BuildHost-netcore/
+    runtimes/
+    *.dll
+
+  python-rag/
+    main.py
+    *.py
+
+  analysis_workspace/
+  README.md
+  AI_INSTRUCTIONS.md
 ```
 
-Use them like this:
-- `files`: locate analyzed files and project boundaries
-- `symbols`: locate likely entry symbols before opening files
-- `show-hotspots`: see the top structural centers immediately
-- `show-isolation`: inspect isolated candidates without reading the whole report
-- `show-isolation --compare-ai-soft-edges`: compare hard-only isolation against AI-soft-edge-aware isolation before deciding whether a pattern deserves hard extraction
-- `graph-meta`: confirm which scan produced the current workspace
-- `xaml-candidates`: identify XAML / code-behind areas where AI-assisted reading is likely worth the cost
-- `ai-candidates`: identify `xaml / reflection / di` areas where AI-assisted reading is likely worth the cost
-- `ai-candidates --bundle-path ...`: emit a prompt-ready candidate bundle JSON for another AI to review
-- `show-ai-edges`: inspect imported AI soft edges before trusting them
-- `show-ai-edges --json`: inspect imported AI soft edge quality via `quality_summary` and `quality_warnings`
+Important:
 
-**JSON Output & Navigation Hints:**
-Many commands support `--json` (e.g., `show-isolation --json`, `show-hotspots --json`, `rules --json`). Report-oriented JSON outputs such as `show-isolation --json` and `show-hotspots --json` include a `navigation_hints` field. Read this field to understand how to interpret the report and what commands to run next.
+- Do not assume `Probe.exe` alone is sufficient.
+- Treat `probe/` as the normal distribution layout. `roslyn-cli/Probe` is a source-tree location for development, not the normal runtime location.
+- Do not assume RepoGraph source code is being developed in place.
+- If `probe/` or `python-rag/` is missing, treat the distribution as incomplete.
+- Do not switch to `dotnet run --project ...` in normal use. That belongs to development mode only.
 
-### 3.2 Scan with Probe
+## 3. Basic Behavior
+
+- Do not start with raw `grep`.
+- Do not manually read the whole repository first.
+- Use RepoGraph outputs to choose where to read.
+- If an `analysis_workspace` for the target already exists, start from that workspace before deciding to rescan.
+- If the workspace does not exist, run `Probe.exe scan ...` first.
+
+## 4. Scan Workflow
+
+Run scan only when the workspace is missing or obviously stale.
+
 ```powershell
-$env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
-& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" run --project C:\tmp\RepoGraph\roslyn-cli\Probe\Probe.csproj -- scan <TARGET_SLN_OR_CSPROJ> --output C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+.\probe\Probe.exe scan <TARGET_SLN_OR_CSPROJ> --output .\analysis_workspace\<workspace_name>
 ```
+
+Notes:
+
+- `Probe.exe` still depends on Roslyn / MSBuild being able to resolve the target project.
+- Real scans may require .NET SDK, Visual Studio Build Tools, or target-specific Developer Packs / targeting packs.
+- If scan fails because the target project environment is incomplete, report that clearly instead of improvising a development workflow.
 
 Main outputs:
+
 - `output/repository.db`
 - `output/graphs/call_graph.json`
 - `output/graphs/inheritance_graph.json`
 - `output/graphs/field_access_graph.json`
 - `output/graphs/type_dependency_graph.json`
 
-Graph metadata notes:
-- `graph.scan_mode`: whether the graph was generated by `full` or `incremental`
-- `graph.solution_path`: the scan target used to generate the graph
+## 5. Navigation Before Grep
 
-### 3.3 Generate Hotspots
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-```
-
-Read `hotspots.md` in this order:
-1. `Anti-Pattern Warnings`
-2. `Threading Hazard Warnings`
-3. `Shared Mutable State`
-4. `Top 50 Hotspots`
-
-### 3.4 Optional: Related Existing Code
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py related "<known FQN or symbol>" --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-```
-
-Use `related` when you want to:
-- find nearby methods or classes before adding a new implementation
-- look for sibling implementations of a bug pattern
-- inspect whether a `isolation` candidate resembles an existing family
-
-### 3.5 Optional: Query
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py query "<concept>" --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-```
-
-### 3.6 Optional: Isolation Candidates
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-```
-
-*(Note: `deadcode` / `show-deadcode` remain as legacy/compatibility aliases for `isolation` / `show-isolation`.)*
-
-Important:
-- `isolation` is not a final decision tool.
-- Use it to narrow search space and explain why something looks isolated.
-- Always confirm with graph evidence, text search, and surrounding code.
-- Prefer the structural isolation JSON report, currently named `dead_code_candidates.json` for compatibility, when another AI or script needs machine-readable reasons.
-- Read `Suppressed Convention Patterns` in the markdown report when you need to understand which framework conventions were intentionally filtered out.
-
-### 3.7 Optional: XAML Candidates For AI Assistance
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py xaml-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --limit 20
-```
-
-Use this when:
-- XAML / code-behind looks under-connected
-- framework-owned callbacks are still likely missing
-- you want to decide where an AI should read before falling back to raw file-by-file exploration
-
-### 3.7b Optional: Reflection / DI Candidates For AI Assistance
-Use this when hard graph recovery is still weak around plugin loading, runtime activation, service resolution, or registration code.
+Use these commands first:
 
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind di --limit 20
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py ai-candidates --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --kind reflection --bundle-path C:\tmp\candidate_bundle.json
+python .\python-rag\main.py files --workspace .\analysis_workspace\<workspace_name> --limit 30
+python .\python-rag\main.py symbols --workspace .\analysis_workspace\<workspace_name> "<name or FQN>"
+python .\python-rag\main.py show-hotspots --workspace .\analysis_workspace\<workspace_name> --limit 20
+python .\python-rag\main.py show-isolation --workspace .\analysis_workspace\<workspace_name> --limit 20
+python .\python-rag\main.py show-isolation --workspace .\analysis_workspace\<workspace_name> --compare-ai-soft-edges
+python .\python-rag\main.py graph-meta --workspace .\analysis_workspace\<workspace_name>
+python .\python-rag\main.py xaml-candidates --workspace .\analysis_workspace\<workspace_name> --limit 20
+python .\python-rag\main.py ai-candidates --workspace .\analysis_workspace\<workspace_name> --kind all --limit 20
+python .\python-rag\main.py show-ai-edges --workspace .\analysis_workspace\<workspace_name> --limit 20 --json
 ```
 
-**AI Bundle Instructions:**
-If you generate a bundle via `--bundle-path`, open the resulting JSON file and read the `usage_notes`, `soft_edge_output_contract`, `review_guidance`, `context_snippets`, `rule_mode_legend`, and `recommended_commands`. The bundle is designed to serve as a map to guide your manual reading and search strategy, rather than providing a final structural verdict.
+Use them like this:
 
-### 3.8 Optional: Import AI Soft Edges
-If an AI reads difficult XAML / callback code and returns soft edges, import them as a separate layer instead of mixing them into the hard graph.
+- `files`: locate analyzed files and project boundaries
+- `symbols`: locate likely entry symbols before opening files
+- `show-hotspots`: identify structural centers first
+- `show-isolation`: inspect structural outliers as investigation aids
+- `graph-meta`: confirm which scan produced the workspace
+- `xaml-candidates`: find XAML / code-behind areas worth AI assistance
+- `ai-candidates`: find `xaml / reflection / di` areas worth AI assistance
+- `show-ai-edges --json`: inspect imported AI soft edge quality
+
+## 6. AI Soft Edge Workflow
+
+When hard graph recovery is weak around XAML, reflection, DI, callbacks, or framework-owned dispatch:
+
+1. Use `xaml-candidates` or `ai-candidates`.
+2. Export a bundle with `--bundle-path`.
+3. Let another AI read the difficult files and produce `ai_soft_edges.json`.
+4. Import the file.
+5. Check `show-ai-edges --json`.
+6. Opt in to use soft edges for `isolation` or `related` only when needed.
+
+Commands:
 
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py import-ai-edges <soft_edges.json> --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --json
+python .\python-rag\main.py ai-candidates --workspace .\analysis_workspace\<workspace_name> --kind reflection --bundle-path .\candidate_bundle.json
+python .\python-rag\main.py import-ai-edges .\ai_soft_edges.json --workspace .\analysis_workspace\<workspace_name>
+python .\python-rag\main.py show-ai-edges --workspace .\analysis_workspace\<workspace_name> --json
+python .\python-rag\main.py isolation --workspace .\analysis_workspace\<workspace_name> --with-ai-soft-edges
+python .\python-rag\main.py related "<known FQN or symbol>" --workspace .\analysis_workspace\<workspace_name> --with-ai-soft-edges
 ```
 
-Read `quality_summary` and `quality_warnings` from `show-ai-edges --json`. They are quality checks only; they do not filter edges, change isolation behavior, or promote soft edges into the hard graph.
+Rules:
 
-To let reports use them, opt in explicitly:
+- `ai_soft_edges.json` is soft evidence, not hard graph.
+- Do not promote AI soft edges into the hard graph by assumption.
+- Use them to guide reading and reduce blind spots.
 
-```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py isolation --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py related "<known FQN or symbol>" --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --with-ai-soft-edges
-```
+## 7. Interpretation
 
-## 4. Recommended Interpretation
+Prioritize these questions:
 
-### When investigating architecture or risk
-Prioritize:
-- high fan-in classes and methods
-- shared mutable state with many runtime writers
-- UI dispatch mixed with background execution
-- type and field access concentration
+- Which files or symbols are central?
+- Which areas have heavy fan-in or state sharing?
+- Which framework-driven areas are likely under-modeled?
+- Which difficult files deserve manual or AI-assisted reading?
 
-### When investigating structural isolation candidates
-Use this sequence:
-1. check `dead_code_candidates.md` or `.json`
-2. inspect the candidate's `why` explanation and structural signals
-3. inspect `call_graph.json`, `type_dependency_graph.json`, and `field_access_graph.json`
-4. search for framework-driven references, reflection, DI registration, events, lambdas, or external entrypoints
-5. only then judge whether the candidate is likely unused
+De-prioritize these mistakes:
 
-## 5. Current Strengths and Limits
+- treating `isolation` as dead-code proof
+- trusting one heuristic report in isolation
+- skipping RepoGraph and jumping straight to file-by-file grep
 
-### Stronger areas
-- hotspot ranking
-- threading hazard detection
-- shared mutable state detection
-- lambda / event / type dependency recovery
-- related-symbol search for similar existing code
-- convention suppression reporting with explicit rule IDs
+## 8. When To Escalate
 
-### Weaker areas
-- reflection-heavy dispatch
-- framework conventions not yet fully modeled
-- some command / host / callback-driven execution paths
-- structural isolation precision in highly dynamic systems
-- incremental scans should still be sanity-checked against full scans on important investigations
-- reflection-heavy generic loaders and wrapper helpers still need extra caution
+Report clearly when:
 
-## 6. Behavioral Guidance
-- Do not manually read the whole repository first.
-- Use RepoGraph outputs to choose where to read.
-- Prefer `files` / `symbols` / `show-hotspots` before raw `grep`.
-- Prefer `xaml-candidates` before manually reading large WPF/Avalonia/XAML areas.
-- If you derive candidate XAML/callback edges manually, keep them in `ai_soft_edges.json` and treat them as soft evidence.
-- Prefer evidence from multiple signals over a single report.
-- If `isolation` conflicts with `hotspots` or obvious framework structure, trust `isolation` less.
+- `probe/` distribution looks incomplete
+- target project resolution fails because SDK / Build Tools / targeting packs are missing
+- workspace is stale and a full rescan is needed
+- hard graph coverage is clearly insufficient and `ai-candidates` should be used
