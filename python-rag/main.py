@@ -477,16 +477,7 @@ def ai_candidates(
     payload = build_ai_candidates(session, graph_loader, normalized_kind, limit)
     bundle_payload = build_ai_candidate_bundle(workspace, normalized_kind, payload)
 
-    if bundle_path:
-        os.makedirs(os.path.dirname(os.path.abspath(bundle_path)), exist_ok=True)
-        with open(bundle_path, "w", encoding="utf-8") as f:
-            json.dump(bundle_payload, f, indent=2, ensure_ascii=False)
 
-    if json_output:
-        print(json.dumps(bundle_payload, indent=2, ensure_ascii=False))
-    else:
-        if bundle_path:
-            print(f"bundle={bundle_path}")
 
     if bundle_path:
         os.makedirs(os.path.dirname(os.path.abspath(bundle_path)), exist_ok=True)

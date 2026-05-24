@@ -6,7 +6,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from isolation import IsolationAnalyzer
-from deadcode import DeadCodeDetector
 from graph import GraphLoader
 from models import Base, Document, Project, Symbol
 
@@ -676,8 +675,6 @@ class IsolationAnalyzerTests(unittest.TestCase):
         self.assertIn("outbound calls touch di", report)
         self.assertIn("outbound type usage touch xaml", report)
 
-    def test_deadcode_alias_points_to_isolation_analyzer(self) -> None:
-        self.assertIs(DeadCodeDetector, IsolationAnalyzer)
 
 
 if __name__ == "__main__":

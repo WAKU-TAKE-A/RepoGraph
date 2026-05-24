@@ -4,8 +4,7 @@ import unittest
 from pathlib import Path
 
 from soft_edges import (
-    compute_deadcode_snapshot,
-    compute_isolation_snapshot,
+        compute_isolation_snapshot,
     load_ai_soft_payload,
     merge_ai_soft_payload,
     normalize_ai_soft_edge,
@@ -140,7 +139,7 @@ class SoftEdgesTests(unittest.TestCase):
         self.assertEqual(2, len(merged["edges"]))
         self.assertEqual(0.9, merged["edges"][1]["confidence"])
 
-    def test_compute_isolation_snapshot_and_deadcode_snapshot(self) -> None:
+    def test_compute_isolation_snapshot_with_and_without_soft_edges(self) -> None:
         isolation_snapshot = compute_isolation_snapshot(
             session=object(),
             graph_loader=object(),
@@ -148,12 +147,12 @@ class SoftEdgesTests(unittest.TestCase):
             include_ai_soft_edges=True,
             analyzer_cls=DummyAnalyzer,
         )
-        deadcode_snapshot = compute_deadcode_snapshot(
+        isolation_snapshot_no_soft = compute_isolation_snapshot(
             session=object(),
             graph_loader=object(),
             reports_dir="reports",
             include_ai_soft_edges=False,
-            detector_cls=DummyAnalyzer,
+            analyzer_cls=DummyAnalyzer,
         )
 
         self.assertEqual(1, isolation_snapshot["count"])
@@ -188,16 +187,16 @@ class SoftEdgesTests(unittest.TestCase):
         self.assertTrue(any("Low confidence (0.4) for: C -> D" in w for w in warnings))
         self.assertTrue(any("Evidence empty for: C -> D" in w for w in warnings))
 
-        deadcode_snapshot = compute_deadcode_snapshot(
+        isolation_snapshot_no_soft = compute_isolation_snapshot(
             session=object(),
             graph_loader=object(),
             reports_dir="reports",
             include_ai_soft_edges=False,
-            detector_cls=DummyAnalyzer,
+            analyzer_cls=DummyAnalyzer,
         )
 
-        self.assertEqual(2, deadcode_snapshot["count"])
-        self.assertEqual({"Demo.Kept()", "Demo.Legacy.LoadPlugin()"}, deadcode_snapshot["candidate_fqns"])
+        self.assertEqual(2, isolation_snapshot_no_soft["count"])
+        self.assertEqual({"Demo.Kept()", "Demo.Legacy.LoadPlugin()"}, isolation_snapshot_no_soft["candidate_fqns"])
 
 
 if __name__ == "__main__":

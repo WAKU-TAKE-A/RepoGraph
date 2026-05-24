@@ -84,7 +84,7 @@ Common Python test commands:
 
 ```powershell
 C:\tmp\RepoGraph\.venv\Scripts\python.exe -m unittest test_main test_soft_edges
-C:\tmp\RepoGraph\.venv\Scripts\python.exe -m unittest test_main test_deadcode test_hotspots test_soft_edges test_retrieval test_summarize
+C:\tmp\RepoGraph\.venv\Scripts\python.exe -m unittest test_main test_isolation test_hotspots test_soft_edges test_retrieval test_summarize
 ```
 
 Run them from:

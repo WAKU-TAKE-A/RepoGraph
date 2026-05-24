@@ -292,25 +292,6 @@ namespace Probe.Services.Analysis
         }
 
 
-        /// <summary>
-        /// Extract method invocation calls.
-        /// </summary>
-
-        /// <summary>
-        /// Detect thread boundary patterns in method body:
-        /// - Invoke/BeginInvoke (UI thread dispatch)
-        /// - Task.Run / Task.Factory.StartNew (background thread spawn)
-        /// - BackgroundWorker usage
-        /// - Application.DoEvents() (re-entrancy hazard)
-        /// - lock statements (mutual exclusion)
-        /// </summary>
-
-        /// <summary>
-        /// Extract all field and property accesses within a method body.
-        /// Tracks read vs write, and whether the access is to an external class.
-        /// </summary>
-
-
         private string DetermineAccessKind(SyntaxNode node)
         {
             var parent = node.Parent;
@@ -347,11 +328,6 @@ namespace Probe.Services.Analysis
 
             return "read";
         }
-
-        /// <summary>
-        /// Detect event handler subscriptions (+=) and unsubscriptions (-=).
-        /// Records them as special method calls with type "event_subscribe" / "event_unsubscribe".
-        /// </summary>
 
         private static string? GetEventDispatchCallerFqn(SemanticModel semanticModel, IEventSymbol eventSymbol, ExtractionResult result)
         {
@@ -491,52 +467,6 @@ namespace Probe.Services.Analysis
         {
             return calledMethod.IsAbstract || calledMethod.ContainingType?.TypeKind == TypeKind.Interface;
         }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         private static bool TryGetFrameworkDelegateDispatchCallerFqn(
             ExtractionResult result,

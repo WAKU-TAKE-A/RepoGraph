@@ -395,12 +395,15 @@ def build_non_xaml_ai_candidates(session, graph_loader, kind: str, limit: int) -
 
 def build_ai_candidates(session, graph_loader, kind: str, limit: int) -> list[dict]:
     payload = []
-    if kind in {"all", "xaml"}:
-        payload.extend(build_xaml_candidates(session, graph_loader, limit if kind == "xaml" else max(limit, 50), include_context=True))
-    if kind in {"all", "reflection"}:
-        payload.extend(build_non_xaml_ai_candidates(session, graph_loader, "reflection", limit if kind == "reflection" else max(limit, 50)))
-    if kind in {"all", "di"}:
-        payload.extend(build_non_xaml_ai_candidates(session, graph_loader, "di", limit if kind == "di" else max(limit, 50)))
+    # Fetch more per-kind when requesting "all" so that global sorting interleaves the top results properly
+    _PER_KIND_CANDIDATE_FETCH_LIMIT = 50
+
+    if kind in ("all", "xaml"):
+        payload.extend(build_xaml_candidates(session, graph_loader, limit if kind == "xaml" else max(limit, _PER_KIND_CANDIDATE_FETCH_LIMIT), include_context=True))
+    if kind in ("all", "reflection"):
+        payload.extend(build_non_xaml_ai_candidates(session, graph_loader, "reflection", limit if kind == "reflection" else max(limit, _PER_KIND_CANDIDATE_FETCH_LIMIT)))
+    if kind in ("all", "di"):
+        payload.extend(build_non_xaml_ai_candidates(session, graph_loader, "di", limit if kind == "di" else max(limit, _PER_KIND_CANDIDATE_FETCH_LIMIT)))
 
     payload.sort(key=lambda item: (-item["score"], item.get("candidate_kind", ""), item.get("file_path", "")))
     return payload[:limit]

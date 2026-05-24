@@ -83,14 +83,6 @@ def compute_isolation_snapshot(session: Any, graph_loader: Any, reports_dir: str
     }
 
 
-def compute_deadcode_snapshot(session: Any, graph_loader: Any, reports_dir: str, include_ai_soft_edges: bool, detector_cls: Any) -> dict:
-    return compute_isolation_snapshot(
-        session,
-        graph_loader,
-        reports_dir,
-        include_ai_soft_edges=include_ai_soft_edges,
-        analyzer_cls=detector_cls,
-    )
 
 
 def summarize_ai_soft_edges(payload_or_edges: dict | list) -> tuple[dict, list[str]]:

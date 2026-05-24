@@ -1,4 +1,4 @@
-# RepoGraph (v0.9.9.0)
+# RepoGraph (v0.9.9.1)
 
 RepoGraph は、巨大な C# / .NET リポジトリを生成 AI が探索しやすくするための解析ツールです。
 
