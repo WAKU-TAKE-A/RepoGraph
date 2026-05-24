@@ -202,7 +202,7 @@ namespace Probe.Services.Analysis
             out string implementationType)
         {
             implementationType = string.Empty;
-            var lambda = SymbolExtractor.ExtractLambda(expression);
+            var lambda = ReflectionDispatchExtractor.ExtractLambda(expression);
             if (lambda == null)
             {
                 return false;
@@ -220,10 +220,11 @@ namespace Probe.Services.Analysis
                 return false;
             }
 
-            bodyExpression = SymbolExtractor.UnwrapExpression(bodyExpression);
+            bodyExpression = ReflectionDispatchExtractor.UnwrapExpression(bodyExpression);
             if (bodyExpression is InvocationExpressionSyntax invocation)
             {
-                implementationType = ServiceDispatchExtractor.ResolveRequestedServiceType(semanticModel, invocation, SymbolExtractor.ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation))) ?? string.Empty;
+                var calledMethod = DirectCallExtractor.ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation));
+                implementationType = ServiceDispatchExtractor.ResolveRequestedServiceType(semanticModel, invocation, calledMethod) ?? string.Empty;
                 return !string.IsNullOrWhiteSpace(implementationType);
             }
 

@@ -12,7 +12,7 @@ namespace Probe.Services.Analysis
     {
         public static IEnumerable<IMethodSymbol> ResolveDelegateTargetMethods(SemanticModel semanticModel, ExpressionSyntax expression)
         {
-            var unwrappedExpression = SymbolExtractor.UnwrapExpression(expression);
+            var unwrappedExpression = ReflectionDispatchExtractor.UnwrapExpression(expression);
 
             if (TryResolveMethodGroupByLookup(semanticModel, unwrappedExpression, out var lookedUpMethods))
             {

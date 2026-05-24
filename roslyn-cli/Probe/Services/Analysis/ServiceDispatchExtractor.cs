@@ -226,7 +226,7 @@ namespace Probe.Services.Analysis
                 return null;
             }
 
-            var firstArgument = SymbolExtractor.UnwrapExpression(invocation.ArgumentList.Arguments[0].Expression);
+            var firstArgument = ReflectionDispatchExtractor.UnwrapExpression(invocation.ArgumentList.Arguments[0].Expression);
             if (firstArgument is TypeOfExpressionSyntax typeOfExpression)
             {
                 var requestedType = semanticModel.GetTypeInfo(typeOfExpression.Type).Type;

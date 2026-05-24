@@ -65,7 +65,7 @@ namespace Probe.Services.Analysis
             foreach (var invocation in SymbolExtractor.GetAnalysisDescendantNodes(node).OfType<InvocationExpressionSyntax>())
             {
                 var calledMethod = DirectCallExtractor.ResolveCalledMethodSymbol(semanticModel.GetSymbolInfo(invocation));
-                if (SymbolExtractor.TryExtractReflectionConstructorDispatch(compilationCache, semanticModel, node, invocation, calledMethod, symbolData, result))
+                if (ReflectionDispatchExtractor.TryExtractConstructorDispatch(compilationCache, semanticModel, node, invocation, calledMethod, symbolData, result))
                 {
                     continue;
                 }
