@@ -311,30 +311,6 @@ namespace Probe.Services.Analysis
 
             return "read";
         }
-
-        private static string? GetEventDispatchCallerFqn(SemanticModel semanticModel, IEventSymbol eventSymbol, ExtractionResult result)
-        {
-            var eventFqn = eventSymbol.ToDisplayString();
-            var eventNamespace = eventSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-            var eventType = eventSymbol.ContainingType?.ToDisplayString();
-
-            if (!LooksLikeFrameworkOwnedSymbol(eventNamespace, eventType))
-            {
-                return eventFqn;
-            }
-
-            return EnsureSyntheticFrameworkSymbol(
-                result,
-                $"framework::{eventFqn}",
-                eventSymbol.Name,
-                "Framework.Events",
-                eventType,
-                eventSymbol.Type?.ToDisplayString(),
-                eventSymbol.Type is INamedTypeSymbol namedType ? namedType.DelegateInvokeMethod?.Parameters.Length ?? 0 : 0);
-        }
-
-
-
         internal static IEnumerable<SyntaxNode> GetAnalysisDescendantNodes(SyntaxNode node)
         {
             if (node is AnonymousFunctionExpressionSyntax anonymousFunction)
@@ -408,83 +384,6 @@ namespace Probe.Services.Analysis
             }
 
             targets.Add(implementationFqn);
-        }
-
-        internal static bool LooksLikeFrameworkOwnedSymbol(string symbolNamespace, string? containingType)
-        {
-            if (symbolNamespace.StartsWith("System.", StringComparison.Ordinal) ||
-                symbolNamespace.StartsWith("Microsoft.", StringComparison.Ordinal) ||
-                symbolNamespace.StartsWith("Windows.", StringComparison.Ordinal))
-            {
-                return true;
-            }
-
-            return containingType != null && (
-                containingType.StartsWith("System.", StringComparison.Ordinal) ||
-                containingType.StartsWith("Microsoft.", StringComparison.Ordinal) ||
-                containingType.StartsWith("Windows.", StringComparison.Ordinal));
-        }
-
-
-
-        internal static string EnsureSyntheticFrameworkSymbol(
-            ExtractionResult result,
-            string fqn,
-            string name,
-            string frameworkNamespace,
-            string? containingType,
-            string? returnType,
-            int parameterCount)
-        {
-            if (!result.Symbols.Any(symbol => string.Equals(symbol.Fqn, fqn, StringComparison.Ordinal)))
-            {
-                result.Symbols.Add(new SymbolData
-                {
-                    Id = GetStableHash(fqn),
-                    Fqn = fqn,
-                    Name = name,
-                    Kind = SyntheticSymbolKindCatalog.FrameworkMethod,
-                    Namespace = frameworkNamespace,
-                    ContainingType = containingType,
-                    Accessibility = "public",
-                    IsStatic = true,
-                    IsAsync = false,
-                    ParameterCount = parameterCount,
-                    ReturnType = returnType,
-                });
-            }
-
-            return fqn;
-        }
-
-        private static bool ShouldExpandDynamicDispatch(InvocationExpressionSyntax invocation, IMethodSymbol calledMethod)
-        {
-            return calledMethod.IsAbstract || calledMethod.ContainingType?.TypeKind == TypeKind.Interface;
-        }
-
-        private static bool TryGetFrameworkDelegateDispatchCallerFqn(
-            ExtractionResult result,
-            IMethodSymbol calleeSymbol,
-            IParameterSymbol delegateParameter,
-            out string dispatchCaller)
-        {
-            dispatchCaller = string.Empty;
-            var containingType = calleeSymbol.ContainingType?.ToDisplayString();
-            var containingNamespace = calleeSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
-            if (!LooksLikeFrameworkOwnedSymbol(containingNamespace, containingType))
-            {
-                return false;
-            }
-
-            dispatchCaller = EnsureSyntheticFrameworkSymbol(
-                result,
-                $"framework::{calleeSymbol.OriginalDefinition.ToDisplayString()}::{delegateParameter.Name}",
-                delegateParameter.Name,
-                "Framework.Delegates",
-                containingType,
-                delegateParameter.Type?.ToDisplayString(),
-                delegateParameter.Type is INamedTypeSymbol namedType ? namedType.DelegateInvokeMethod?.Parameters.Length ?? 0 : 0);
-            return !string.IsNullOrWhiteSpace(dispatchCaller);
         }
 
         private static bool IsDelegateLike(ITypeSymbol? type)

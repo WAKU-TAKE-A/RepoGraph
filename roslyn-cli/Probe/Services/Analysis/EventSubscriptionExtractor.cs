@@ -42,53 +42,15 @@ namespace Probe.Services.Analysis
                             CallerId = symbolData.Fqn,
                             CalleeId = handlerFqn,
                             CallCount = 1,
-                            CallType = FrameworkRuleCatalog.DelegateReference.CallType,
-                            RuleId = FrameworkRuleCatalog.DelegateReference.RuleId,
-                            RuleFamily = FrameworkRuleCatalog.DelegateReference.Family,
-                            RuleMode = FrameworkRuleCatalog.DelegateReference.ModeName
+                            CallType = "delegate_reference",
+                            RuleId = null,
+                            RuleFamily = null,
+                            RuleMode = null
                         });
 
-                        if (isSubscribe && eventSymbol != null)
-                        {
-                            var dispatchCaller = GetEventDispatchCallerFqn(semanticModel, eventSymbol, result);
-                            if (!string.IsNullOrWhiteSpace(dispatchCaller))
-                            {
-                                result.MethodCalls.Add(new MethodCallData
-                                {
-                                    CallerId = dispatchCaller,
-                                    CalleeId = handlerFqn,
-                                    CallCount = 1,
-                                    CallType = FrameworkRuleCatalog.EventDispatch.CallType,
-                                    RuleId = FrameworkRuleCatalog.EventDispatch.RuleId,
-                                    RuleFamily = FrameworkRuleCatalog.EventDispatch.Family,
-                                    RuleMode = FrameworkRuleCatalog.EventDispatch.ModeName
-                                });
-                            }
-                        }
                     }
                 }
             }
-        }
-
-        private static string? GetEventDispatchCallerFqn(SemanticModel semanticModel, IEventSymbol eventSymbol, ExtractionResult result)
-        {
-            var eventFqn = eventSymbol.ToDisplayString();
-            var eventNamespace = eventSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-            var eventType = eventSymbol.ContainingType?.ToDisplayString();
-
-            if (!SymbolExtractor.LooksLikeFrameworkOwnedSymbol(eventNamespace, eventType))
-            {
-                return eventFqn;
-            }
-
-            return SymbolExtractor.EnsureSyntheticFrameworkSymbol(
-                result,
-                $"framework::{eventFqn}",
-                eventSymbol.Name,
-                "Framework.Events",
-                eventType,
-                eventSymbol.Type?.ToDisplayString(),
-                eventSymbol.Type is INamedTypeSymbol namedType ? namedType.DelegateInvokeMethod?.Parameters.Length ?? 0 : 0);
         }
     }
 }

@@ -26,12 +26,7 @@ namespace Probe.Dsl.Tests
         };
 
         // Temporary migration debt: legacy files allowed to contain framework-specific logic for now
-        private static readonly string[] TemporaryLegacyAllowlist = new[]
-        {
-            "DelegateReferenceExtractor.cs",
-            "FrameworkRuleCatalog.cs",
-            "FrameworkRuleCatalogLoader.cs"
-        };
+        private static readonly string[] TemporaryLegacyAllowlist = new string[0];
 
         [Fact]
         public void CoreAnalysis_ShouldNotContainPackageSpecificHeuristics()
