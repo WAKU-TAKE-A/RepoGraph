@@ -1,0 +1,29 @@
+{
+  "id": "di_get_required_service",
+  "description": "DI GetRequiredService generic argument to constructor candidate rule",
+  "scope": { "source": "csharp_invocation", "target": "csharp_symbol" },
+  "match": {
+    "where": [
+      { "field": "method.name", "op": "eq", "value": "GetRequiredService" },
+      { "field": "invocation.generic_arg[0]", "op": "exists" }
+    ]
+  },
+  "bind": {
+    "service_type": "$invocation.generic_arg[0]"
+  },
+  "resolve": {
+    "target": {
+      "kind": "method",
+      "where": [
+        { "field": "name", "op": "eq", "value": ".ctor" },
+        { "field": "containing_type", "op": "eq", "value": "$service_type" }
+      ]
+    }
+  },
+  "emit": {
+    "edge_kind": "candidate_call",
+    "rule_mode": "candidate",
+    "rule_id": "di_get_required_service",
+    "rule_family": "di"
+  }
+}

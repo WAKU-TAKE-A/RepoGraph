@@ -1,0 +1,25 @@
+{
+  "id": "aspnet_startup",
+  "description": "ASP.NET Core Startup method caller inference",
+  "scope": { "source": "framework_synthetic", "target": "csharp_symbol" },
+  "match": {
+    "where": [
+      { "field": "fqn", "op": "eq", "value": "ASP.NET_Core" }
+    ]
+  },
+  "resolve": {
+    "target": {
+      "kind": "method",
+      "where": [
+        { "field": "name", "op": "eq", "value": "ConfigureServices" },
+        { "field": "containing_type", "op": "eq", "value": "Startup" }
+      ]
+    }
+  },
+  "emit": {
+    "edge_kind": "candidate_call",
+    "rule_mode": "candidate",
+    "rule_id": "aspnet_startup",
+    "rule_family": "lifecycle"
+  }
+}

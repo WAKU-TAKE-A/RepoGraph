@@ -1,0 +1,35 @@
+{
+  "id": "smoke.test.rule",
+  "description": "Matches Controller and emits candidate",
+  "scope": {
+    "source": "csharp_symbol",
+    "target": "csharp_symbol"
+  },
+  "match": {
+    "where": [
+      {
+        "field": "name",
+        "op": "eq",
+        "value": "Controller"
+      }
+    ]
+  },
+  "resolve": {
+    "target": {
+      "where": [
+        {
+          "field": "name",
+          "op": "eq",
+          "value": "Controller"
+        }
+      ]
+    }
+  },
+  "emit": {
+    "rule_mode": "candidate",
+    "rule_id": "smoke.test.rule",
+    "rule_family": "smoke",
+    "edge_kind": "candidate_type_dependency",
+    "call_type": "smoke_dependency"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "id": "di.autofac_resolve_generic",
+  "description": "Generic Autofac Resolve<T> invocation to matching constructor candidates.",
+  "scope": { "source": "csharp_invocation", "target": "csharp_symbol" },
+  "match": {
+    "where": [
+      { "field": "method.name", "op": "eq", "value": "Resolve" },
+      { "field": "invocation.generic_arg[0]", "op": "exists" }
+    ]
+  },
+  "bind": {
+    "service_type": "$invocation.generic_arg[0]"
+  },
+  "resolve": {
+    "target": {
+      "kind": "constructor",
+      "where": [
+        { "field": "containing_type", "op": "suffix", "value": "$service_type" }
+      ]
+    }
+  },
+  "emit": {
+    "edge_kind": "candidate_call",
+    "call_type": "autofac_resolve_dispatch",
+    "rule_id": "di.autofac_resolve_generic",
+    "rule_family": "di",
+    "rule_mode": "candidate",
+    "confidence": "medium"
+  }
+}

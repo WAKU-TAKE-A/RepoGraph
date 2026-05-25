@@ -28,6 +28,9 @@
     <Content Include="..\..\rules\framework_rules.json" Link="rules\framework_rules.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="..\..\rules\dsl\*.json" Link="rules\dsl\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

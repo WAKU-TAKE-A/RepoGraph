@@ -51,6 +51,10 @@ htmlcov/
 *.json
 !analyzer.yml
 !rag_config.yml
+# DSL rule fixtures (test-only) and production DSL rules must be tracked
+!roslyn-cli/Probe.Dsl.Tests/Fixtures/*.json
+!roslyn-cli/Probe.Dsl.Tests/Fixtures/SmokeProject/rules/*.json
+!rules/dsl/*.json
 
 # Logs
 *.log

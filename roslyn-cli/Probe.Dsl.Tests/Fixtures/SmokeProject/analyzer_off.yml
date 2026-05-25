@@ -1,0 +1,3 @@
+analysis:
+  enableDslCandidates: false
+  dslRulesDirectory: "rules"

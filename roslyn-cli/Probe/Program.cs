@@ -14,6 +14,7 @@ using Microsoft.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml.Linq;
+using Probe.Services.Analysis.Dsl;
 
 namespace Probe
 {
@@ -27,6 +28,14 @@ namespace Probe
                 .AddSingleton<SymbolExtractor>()
                 .AddSingleton<XamlRelationshipExtractor>()
                 .AddSingleton<ConfigLoader>()
+                // DSL rule loading and candidate extraction services (opt-in use only)
+                .AddSingleton<DslRuleValidator>()
+                .AddSingleton<DslRuleLoader>()
+                .AddSingleton<DslConditionEvaluator>()
+                .AddSingleton<DslBindingEvaluator>()
+                .AddSingleton<DslTargetResolver>()
+                .AddSingleton<DslCandidateEmitter>()
+                .AddSingleton<DslCandidateExtractor>()
                 .BuildServiceProvider();
 
             var rootCommand = new RootCommand("RepoGraph - Roslyn Repository Analyzer");
@@ -87,6 +96,9 @@ namespace Probe
                     .ToList();
                 var stableProjectIds = new Dictionary<ProjectId, string>();
                 var projectDependencies = new List<ProjectDependencyData>();
+                var allSymbols = new List<SymbolData>();
+                var allInvocationRecords = new List<IReadOnlyDictionary<string, object?>>();
+                var allXmlAttributeRecords = new List<IReadOnlyDictionary<string, object?>>();
                 var allMethodCalls = new List<MethodCallData>();
                 var allInheritances = new List<InheritanceData>();
                 var allFieldAccesses = new List<FieldAccessData>();
@@ -205,6 +217,13 @@ namespace Probe
                                 var tree = await document.GetSyntaxTreeAsync();
                                 if (tree == null) continue;
 
+                                if (config.Analysis?.EnableDslCandidates == true)
+                                {
+                                    var semanticModel = compilation.GetSemanticModel(tree);
+                                    var invocations = DslInvocationRecordCollector.Collect(semanticModel, await tree.GetRootAsync());
+                                    allInvocationRecords.AddRange(invocations);
+                                }
+
                                 var result = extractor.Extract(compilation, tree);
 
                                 foreach (var symbol in result.Symbols)
@@ -215,6 +234,7 @@ namespace Probe
 
                                 if (result.Symbols.Any())
                                 {
+                                    allSymbols.AddRange(result.Symbols);
                                     await persistence.SaveSymbolsAsync(result.Symbols);
                                     IndexMethods(methodIndex, result.Symbols);
                                     IndexBindingMembers(bindingMemberIndex, result.Symbols);
@@ -249,6 +269,12 @@ namespace Probe
                         var xamlPaths = FindProjectXamlFiles(project.FilePath ?? project.Name, filterService);
                         if (xamlPaths.Count > 0)
                         {
+                            if (config.Analysis?.EnableDslCandidates == true)
+                            {
+                                var xmlRecords = DslXmlAttributeRecordCollector.Collect(xamlPaths);
+                                allXmlAttributeRecords.AddRange(xmlRecords);
+                            }
+
                             var xamlResult = xamlExtractor.Extract(project.Name, projectId, project.FilePath ?? project.Name, xamlPaths, methodIndex, bindingMemberIndex);
 
                             foreach (var xamlDocument in xamlResult.Documents)
@@ -258,6 +284,7 @@ namespace Probe
 
                             if (xamlResult.Symbols.Count > 0)
                             {
+                                allSymbols.AddRange(xamlResult.Symbols);
                                 await persistence.SaveSymbolsAsync(xamlResult.Symbols);
                             }
 
@@ -300,6 +327,65 @@ namespace Probe
                     await persistence.SaveProjectDependenciesAsync(projectDependencies);
                 }
 
+                // DSL candidate activation (opt-in only; supported source scopes are filtered below).
+                if (config.Analysis?.EnableDslCandidates == true)
+                {
+                    logger.LogInformation("DSL candidate rules enabled.");
+
+                    var dslRulesDir = config.Analysis.DslRulesDirectory;
+                    if (string.IsNullOrWhiteSpace(dslRulesDir))
+                    {
+                        dslRulesDir = Path.Combine(AppContext.BaseDirectory, "rules", "dsl");
+                    }
+
+                    logger.LogInformation("DSL rules directory: {Dir}", dslRulesDir);
+
+                    var dslLoader = serviceProvider.GetRequiredService<DslRuleLoader>();
+                    var ruleSet = dslLoader.LoadRules(dslRulesDir);
+                    logger.LogInformation("Loaded DSL rules: {Count}", ruleSet.Rules.Count);
+
+                    if (ruleSet.Rules.Count > 0)
+                    {
+                        // Collect all SymbolData extracted so far from persistence symbols list.
+                        // We use the allSymbols list that is already available in scope.
+                        var symbolRecords = DslSymbolDataAdapter.FromSymbolDataCollection(allSymbols);
+
+                        var allSources = new List<IReadOnlyDictionary<string, object?>>();
+                        allSources.AddRange(symbolRecords);
+                        allSources.AddRange(allInvocationRecords);
+                        allSources.AddRange(allXmlAttributeRecords);
+
+                        // Only run rules scoped to supported sources in this checkpoint.
+                        var validScopes = new HashSet<string> { "csharp_symbol", "csharp_invocation", "xml_attribute" };
+                        var symbolRules = ruleSet.Rules
+                            .Where(r => r.Scope != null && validScopes.Contains(r.Scope.Source ?? string.Empty))
+                            .ToList();
+
+                        var dslExtractor = serviceProvider.GetRequiredService<DslCandidateExtractor>();
+                        var dslResult = dslExtractor.Extract(symbolRules, allSources, symbolRecords);
+
+                        logger.LogInformation("DSL candidate method calls: {Count}",
+                            dslResult.Extraction.MethodCalls.Count);
+                        logger.LogInformation("DSL candidate type dependencies: {Count}",
+                            dslResult.Extraction.TypeDependencies.Count);
+                        logger.LogInformation("DSL diagnostics: {Count}",
+                            dslResult.Diagnostics.Count);
+
+                        if (dslResult.Diagnostics.Count > 0)
+                        {
+                            foreach (var diag in dslResult.Diagnostics.Take(10))
+                            {
+                                logger.LogWarning("DSL diagnostic [{Rule}] {Code}: {Message}",
+                                    diag.RuleId, diag.Code, diag.Message);
+                            }
+                        }
+
+                        // Merge candidate edges into existing lists before save.
+                        allMethodCalls.AddRange(dslResult.Extraction.MethodCalls);
+                        allTypeDependencies.AddRange(dslResult.Extraction.TypeDependencies);
+                    }
+                }
+
                 if (allMethodCalls.Any())
                 {
                     await persistence.SaveMethodCallsAsync(allMethodCalls);
@@ -326,6 +412,7 @@ namespace Probe
                 var graphOutputDir = Path.Combine(output, "output", "graphs");
                 var graphService = new GraphService(dbPath, graphOutputDir, serviceProvider.GetRequiredService<ILogger<GraphService>>());
                 await graphService.ExportGraphsAsync(runId, mode, path);
+
 
                 await persistence.UpdateAnalysisRunStatusAsync(runId, "completed");
                 logger.LogInformation("Analysis completed.");

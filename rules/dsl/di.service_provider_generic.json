@@ -1,0 +1,30 @@
+{
+  "id": "di.service_provider_generic",
+  "description": "Generic Microsoft.Extensions.DependencyInjection service resolution to matching constructor candidates.",
+  "scope": { "source": "csharp_invocation", "target": "csharp_symbol" },
+  "match": {
+    "where": [
+      { "field": "method.name", "op": "in", "value": [ "GetRequiredService", "GetService" ] },
+      { "field": "invocation.generic_arg[0]", "op": "exists" }
+    ]
+  },
+  "bind": {
+    "service_type": "$invocation.generic_arg[0]"
+  },
+  "resolve": {
+    "target": {
+      "kind": "constructor",
+      "where": [
+        { "field": "containing_type", "op": "suffix", "value": "$service_type" }
+      ]
+    }
+  },
+  "emit": {
+    "edge_kind": "candidate_call",
+    "call_type": "service_provider_dispatch",
+    "rule_id": "di.service_provider_generic",
+    "rule_family": "di",
+    "rule_mode": "candidate",
+    "confidence": "medium"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "id": "xaml_event",
+  "description": "XAML event handler candidate rule",
+  "scope": { "source": "xml_attribute", "target": "csharp_symbol" },
+  "match": {
+    "where": [
+      { "field": "name", "op": "eq", "value": "Click" }
+    ]
+  },
+  "bind": {
+    "handler_name": "$value",
+    "x_class": "$document.x_class"
+  },
+  "resolve": {
+    "target": {
+      "kind": "method",
+      "where": [
+        { "field": "name", "op": "eq", "value": "$handler_name" },
+        { "field": "fqn", "op": "contains", "value": "$x_class" }
+      ]
+    }
+  },
+  "emit": {
+    "edge_kind": "candidate_call",
+    "rule_mode": "candidate",
+    "rule_id": "xaml_event",
+    "rule_family": "markup"
+  }
+}

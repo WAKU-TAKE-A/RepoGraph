@@ -1,0 +1,57 @@
+{
+  "id": "xaml.event_handlers",
+  "description": "XAML attribute values that directly name code-behind event handler methods.",
+  "scope": { "source": "xml_attribute", "target": "csharp_symbol" },
+  "match": {
+    "where": [
+      {
+        "field": "name",
+        "op": "in",
+        "value": [
+          "Click",
+          "Loaded",
+          "Unloaded",
+          "Initialized",
+          "SelectionChanged",
+          "TextChanged",
+          "Checked",
+          "Unchecked",
+          "ValueChanged",
+          "CanExecute",
+          "Executed",
+          "MouseDown",
+          "MouseUp",
+          "MouseMove",
+          "KeyDown",
+          "KeyUp",
+          "GotFocus",
+          "LostFocus",
+          "SizeChanged"
+        ]
+      },
+      { "field": "value", "op": "regex", "value": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      { "field": "document.x_class", "op": "exists" }
+    ]
+  },
+  "bind": {
+    "handler_name": "$value",
+    "x_class": "$document.x_class"
+  },
+  "resolve": {
+    "target": {
+      "kind": "method",
+      "where": [
+        { "field": "name", "op": "eq", "value": "$handler_name" },
+        { "field": "containing_type", "op": "eq", "value": "$x_class" }
+      ]
+    }
+  },
+  "emit": {
+    "edge_kind": "candidate_call",
+    "call_type": "xaml_event",
+    "rule_id": "xaml.event_handlers",
+    "rule_family": "xaml",
+    "rule_mode": "candidate",
+    "confidence": "high"
+  }
+}

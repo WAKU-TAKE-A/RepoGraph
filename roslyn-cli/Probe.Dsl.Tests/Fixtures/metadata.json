@@ -1,0 +1,25 @@
+{
+  "id": "on_deserialized",
+  "description": "Serialization callback inference driven by attributes",
+  "scope": { "source": "csharp_symbol", "target": "framework_synthetic" },
+  "match": {
+    "where": [
+      { "field": "kind", "op": "eq", "value": "method" },
+      { "field": "name", "op": "eq", "value": "OnDeserialized" },
+      { "field": "has_callback_attribute", "op": "eq", "value": "true" }
+    ]
+  },
+  "resolve": {
+    "target": {
+      "where": [
+        { "field": "fqn", "op": "eq", "value": "System.Runtime.Serialization" }
+      ]
+    }
+  },
+  "emit": {
+    "edge_kind": "candidate_call",
+    "rule_mode": "candidate",
+    "rule_id": "on_deserialized",
+    "rule_family": "metadata"
+  }
+}

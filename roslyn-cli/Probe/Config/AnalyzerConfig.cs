@@ -24,6 +24,9 @@ namespace Probe.Config
         public bool IncludeInheritance { get; set; } = true;
         public bool IncludeInterfaceMappings { get; set; } = true;
         public bool IncludeMethodBodies { get; set; } = true;
+        // DSL heuristic candidate rules (opt-in, default off)
+        public bool EnableDslCandidates { get; set; } = false;
+        public string DslRulesDirectory { get; set; } = "";
     }
 
     public class PerformanceConfig
