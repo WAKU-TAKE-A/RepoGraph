@@ -12,7 +12,7 @@ namespace Probe.Services.Analysis
     {
         public static IEnumerable<IMethodSymbol> ResolveDelegateTargetMethods(SemanticModel semanticModel, ExpressionSyntax expression)
         {
-            var unwrappedExpression = ReflectionDispatchExtractor.UnwrapExpression(expression);
+            var unwrappedExpression = UnwrapExpression(expression);
 
             if (TryResolveMethodGroupByLookup(semanticModel, unwrappedExpression, out var lookedUpMethods))
             {
@@ -174,6 +174,16 @@ namespace Probe.Services.Analysis
             {
                 yield return anonymousFunction.Symbol;
             }
+        }
+
+        private static ExpressionSyntax UnwrapExpression(ExpressionSyntax expression)
+        {
+            while (expression is ParenthesizedExpressionSyntax parenthesized)
+            {
+                expression = parenthesized.Expression;
+            }
+
+            return expression;
         }
     }
 }

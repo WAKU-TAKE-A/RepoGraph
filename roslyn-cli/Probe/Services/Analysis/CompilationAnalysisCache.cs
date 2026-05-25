@@ -10,12 +10,10 @@ namespace Probe.Services.Analysis
         private readonly Dictionary<string, HashSet<string>> _dispatchMap;
         private readonly Dictionary<string, List<MethodLookupEntry>> _methodLookup;
         private readonly HashSet<string> _knownMethods;
-        private readonly Dictionary<string, ReflectionTypeMetadata> _reflectionTypes;
 
         public CompilationAnalysisCache(
             Dictionary<string, HashSet<string>> dispatchMap,
-            Dictionary<string, List<MethodLookupEntry>> methodLookup,
-            Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
+            Dictionary<string, List<MethodLookupEntry>> methodLookup)
         {
             _dispatchMap = dispatchMap;
             _methodLookup = methodLookup;
@@ -23,7 +21,6 @@ namespace Probe.Services.Analysis
                 .SelectMany(methods => methods)
                 .Select(method => method.Fqn)
                 .ToHashSet(StringComparer.Ordinal);
-            _reflectionTypes = reflectionTypes;
         }
 
         public IEnumerable<string> GetDispatchTargets(IMethodSymbol calledMethod)
@@ -59,58 +56,6 @@ namespace Probe.Services.Analysis
         {
             return _knownMethods.Contains(fqn);
         }
-
-        public HashSet<string> GetAllTypeFqns()
-        {
-            return _reflectionTypes.Keys.ToHashSet(StringComparer.Ordinal);
-        }
-
-        public HashSet<string> GetConcreteTypesAssignableTo(string baseTypeFqn)
-        {
-            return _reflectionTypes.Values
-                .Where(type => !type.IsAbstract && !type.IsInterface && type.IsAssignableTo(baseTypeFqn))
-                .Select(type => type.Fqn)
-                .ToHashSet(StringComparer.Ordinal);
-        }
-
-        public bool TryGetTypeMetadata(string fqn, out ReflectionTypeMetadata metadata)
-        {
-            return _reflectionTypes.TryGetValue(fqn, out metadata!);
-        }
-
-        public IEnumerable<string> GetConstructorCandidates(IEnumerable<string> candidateTypeFqns, IReadOnlyList<string> parameterTypes)
-        {
-            foreach (var typeFqn in candidateTypeFqns)
-            {
-                if (!_reflectionTypes.TryGetValue(typeFqn, out var metadata))
-                {
-                    continue;
-                }
-
-                foreach (var constructor in metadata.Constructors)
-                {
-                    if (constructor.ParameterTypes.Count != parameterTypes.Count)
-                    {
-                        continue;
-                    }
-
-                    var exactMatch = true;
-                    for (var i = 0; i < parameterTypes.Count; i++)
-                    {
-                        if (!string.Equals(constructor.ParameterTypes[i], parameterTypes[i], StringComparison.Ordinal))
-                        {
-                            exactMatch = false;
-                            break;
-                        }
-                    }
-
-                    if (exactMatch)
-                    {
-                        yield return constructor.Fqn;
-                    }
-                }
-            }
-        }
     }
 
     internal sealed class MethodLookupEntry
@@ -118,31 +63,4 @@ namespace Probe.Services.Analysis
         public string Fqn { get; set; } = "";
         public int ParameterCount { get; set; }
     }
-
-    internal sealed record ReflectionTypeMetadata(
-        string Fqn,
-        string Name,
-        bool IsAbstract,
-        bool IsClass,
-        bool IsInterface,
-        IReadOnlySet<string> AssignableTypeFqns,
-        IReadOnlyList<ReflectionConstructorMetadata> Constructors)
-    {
-        public bool IsAssignableTo(string baseTypeFqn)
-        {
-            return AssignableTypeFqns.Contains(baseTypeFqn);
-        }
-    }
-
-    internal sealed record ReflectionConstructorMetadata(
-        string Fqn,
-        IReadOnlyList<string> ParameterTypes,
-        bool IsPublic);
-
-    internal sealed record FrameworkEntrypoint(
-        FrameworkRuleMetadata Rule,
-        string FrameworkCallerFqn,
-        string FrameworkCallerName,
-        string FrameworkNamespace,
-        string FrameworkContainingType);
 }

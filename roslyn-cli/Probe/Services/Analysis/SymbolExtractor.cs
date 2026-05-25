@@ -463,37 +463,34 @@ namespace Probe.Services.Analysis
         {
             var dispatchMap = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             var methodLookup = new Dictionary<string, List<MethodLookupEntry>>(StringComparer.Ordinal);
-            var reflectionTypes = new Dictionary<string, ReflectionTypeMetadata>(StringComparer.Ordinal);
-            VisitNamespace(compilation.GlobalNamespace, dispatchMap, methodLookup, reflectionTypes);
-            return new CompilationAnalysisCache(dispatchMap, methodLookup, reflectionTypes);
+            VisitNamespace(compilation.GlobalNamespace, dispatchMap, methodLookup);
+            return new CompilationAnalysisCache(dispatchMap, methodLookup);
         }
 
 
-
-        private void VisitNamespace(INamespaceSymbol ns, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
+        private void VisitNamespace(INamespaceSymbol ns, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup)
         {
             foreach (var member in ns.GetMembers())
             {
                 if (member is INamespaceSymbol childNs)
                 {
-                    VisitNamespace(childNs, dispatchMap, methodLookup, reflectionTypes);
+                    VisitNamespace(childNs, dispatchMap, methodLookup);
                 }
                 else if (member is INamedTypeSymbol namedType)
                 {
-                    VisitType(namedType, dispatchMap, methodLookup, reflectionTypes);
+                    VisitType(namedType, dispatchMap, methodLookup);
                 }
             }
         }
 
-        private void VisitType(INamedTypeSymbol type, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
+        private void VisitType(INamedTypeSymbol type, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup)
         {
             foreach (var nested in type.GetTypeMembers())
             {
-                VisitType(nested, dispatchMap, methodLookup, reflectionTypes);
+                VisitType(nested, dispatchMap, methodLookup);
             }
 
             var typeFqn = type.OriginalDefinition.ToDisplayString();
-            reflectionTypes[typeFqn] = CreateReflectionTypeMetadata(type);
 
             foreach (var method in type.GetMembers().OfType<IMethodSymbol>())
             {
@@ -536,43 +533,6 @@ namespace Probe.Services.Analysis
                     AddDispatchTarget(dispatchMap, interfaceMethod.OriginalDefinition.ToDisplayString(), implementation.OriginalDefinition.ToDisplayString());
                 }
             }
-        }
-
-        private static ReflectionTypeMetadata CreateReflectionTypeMetadata(INamedTypeSymbol type)
-        {
-            var assignableTypes = new HashSet<string>(StringComparer.Ordinal)
-            {
-                type.OriginalDefinition.ToDisplayString()
-            };
-
-            var currentBase = type.BaseType;
-            while (currentBase != null)
-            {
-                assignableTypes.Add(currentBase.OriginalDefinition.ToDisplayString());
-                currentBase = currentBase.BaseType;
-            }
-
-            foreach (var iface in type.AllInterfaces)
-            {
-                assignableTypes.Add(iface.OriginalDefinition.ToDisplayString());
-            }
-
-            var constructors = type.InstanceConstructors
-                .Where(ctor => !ctor.IsStatic && (ctor.DeclaredAccessibility == Accessibility.Public || !ctor.IsImplicitlyDeclared))
-                .Select(ctor => new ReflectionConstructorMetadata(
-                    ctor.OriginalDefinition.ToDisplayString(),
-                    ctor.Parameters.Select(parameter => parameter.Type.OriginalDefinition.ToDisplayString()).ToArray(),
-                    ctor.DeclaredAccessibility == Accessibility.Public))
-                .ToList();
-
-            return new ReflectionTypeMetadata(
-                type.OriginalDefinition.ToDisplayString(),
-                type.Name,
-                type.IsAbstract,
-                type.TypeKind == TypeKind.Class,
-                type.TypeKind == TypeKind.Interface,
-                assignableTypes,
-                constructors);
         }
 
 
