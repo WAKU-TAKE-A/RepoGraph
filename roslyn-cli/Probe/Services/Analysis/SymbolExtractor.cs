@@ -17,24 +17,10 @@ namespace Probe.Services.Analysis
     {
         private readonly ILogger<SymbolExtractor> _logger;
         private readonly ConditionalWeakTable<Compilation, CompilationAnalysisCache> _compilationCache = new();
-        private Dictionary<string, HashSet<string>> _solutionServiceRegistrations = new(StringComparer.Ordinal);
 
         public SymbolExtractor(ILogger<SymbolExtractor> logger)
         {
             _logger = logger;
-        }
-
-        public void SetSolutionServiceRegistrations(Dictionary<string, HashSet<string>> registrations)
-        {
-            _solutionServiceRegistrations = CloneRegistrationMap(registrations);
-            _compilationCache.Clear();
-        }
-
-        public Dictionary<string, HashSet<string>> CollectServiceRegistrations(Compilation compilation)
-        {
-            var registrations = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-            ServiceRegistrationCollector.CollectServiceRegistrations(compilation, registrations);
-            return registrations;
         }
 
         public ExtractionResult Extract(Compilation compilation, SyntaxTree tree)
@@ -184,7 +170,6 @@ namespace Probe.Services.Analysis
                 }
 
                 ExtractOverrideDispatch(compilationCache, method, symbolData, result);
-                FrameworkConventionDispatcher.ExtractEntrypoints(method, declarationNode, symbolData, result);
                 
             }
 
@@ -192,7 +177,6 @@ namespace Probe.Services.Analysis
                 || (symbol is IPropertySymbol && HasPropertyExecutableBody(declarationNode)))
             {
                 DirectCallExtractor.ExtractMethodCalls(compilationCache, semanticModel, declarationNode, symbolData, result);
-                FrameworkConventionDispatcher.ExtractDependencies(compilationCache, semanticModel, declarationNode, symbolData, result);
                 ThreadBoundaryExtractor.ExtractThreadBoundaries(semanticModel, declarationNode, symbolData);
                 FieldAccessExtractor.ExtractFieldAccesses(semanticModel, declarationNode, symbolData, result);
                 EventSubscriptionExtractor.ExtractEventSubscriptions(semanticModel, declarationNode, symbolData, result);
@@ -236,7 +220,6 @@ namespace Probe.Services.Analysis
             result.Symbols.Add(symbolData);
 
             DirectCallExtractor.ExtractMethodCalls(compilationCache, semanticModel, anonymousFunction, symbolData, result);
-            FrameworkConventionDispatcher.ExtractDependencies(compilationCache, semanticModel, anonymousFunction, symbolData, result);
             ThreadBoundaryExtractor.ExtractThreadBoundaries(semanticModel, anonymousFunction, symbolData);
             FieldAccessExtractor.ExtractFieldAccesses(semanticModel, anonymousFunction, symbolData, result);
             EventSubscriptionExtractor.ExtractEventSubscriptions(semanticModel, anonymousFunction, symbolData, result);
@@ -416,6 +399,17 @@ namespace Probe.Services.Analysis
             return false;
         }
 
+        private static void AddDispatchTarget(Dictionary<string, HashSet<string>> dispatchMap, string contractFqn, string implementationFqn)
+        {
+            if (!dispatchMap.TryGetValue(contractFqn, out var targets))
+            {
+                targets = new HashSet<string>(StringComparer.Ordinal);
+                dispatchMap[contractFqn] = targets;
+            }
+
+            targets.Add(implementationFqn);
+        }
+
         internal static bool LooksLikeFrameworkOwnedSymbol(string symbolNamespace, string? containingType)
         {
             if (symbolNamespace.StartsWith("System.", StringComparison.Ordinal) ||
@@ -570,55 +564,37 @@ namespace Probe.Services.Analysis
         {
             var dispatchMap = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             var methodLookup = new Dictionary<string, List<MethodLookupEntry>>(StringComparer.Ordinal);
-            var autofacModuleTypes = new HashSet<string>(StringComparer.Ordinal);
-            var autofacModuleLoadMethods = new HashSet<string>(StringComparer.Ordinal);
             var reflectionTypes = new Dictionary<string, ReflectionTypeMetadata>(StringComparer.Ordinal);
-            var serviceRegistrations = CloneRegistrationMap(_solutionServiceRegistrations);
-            VisitNamespace(compilation.GlobalNamespace, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
-            ServiceRegistrationCollector.CollectServiceRegistrations(compilation, serviceRegistrations);
-            return new CompilationAnalysisCache(dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes, serviceRegistrations);
-        }
-
-        private static Dictionary<string, HashSet<string>> CloneRegistrationMap(Dictionary<string, HashSet<string>> source)
-        {
-            return source.ToDictionary(
-                entry => entry.Key,
-                entry => new HashSet<string>(entry.Value, StringComparer.Ordinal),
-                StringComparer.Ordinal);
+            VisitNamespace(compilation.GlobalNamespace, dispatchMap, methodLookup, reflectionTypes);
+            return new CompilationAnalysisCache(dispatchMap, methodLookup, reflectionTypes);
         }
 
 
 
-        private void VisitNamespace(INamespaceSymbol ns, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
+        private void VisitNamespace(INamespaceSymbol ns, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
         {
             foreach (var member in ns.GetMembers())
             {
                 if (member is INamespaceSymbol childNs)
                 {
-                    VisitNamespace(childNs, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
+                    VisitNamespace(childNs, dispatchMap, methodLookup, reflectionTypes);
                 }
                 else if (member is INamedTypeSymbol namedType)
                 {
-                    VisitType(namedType, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
+                    VisitType(namedType, dispatchMap, methodLookup, reflectionTypes);
                 }
             }
         }
 
-        private void VisitType(INamedTypeSymbol type, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, HashSet<string> autofacModuleTypes, HashSet<string> autofacModuleLoadMethods, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
+        private void VisitType(INamedTypeSymbol type, Dictionary<string, HashSet<string>> dispatchMap, Dictionary<string, List<MethodLookupEntry>> methodLookup, Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
         {
             foreach (var nested in type.GetTypeMembers())
             {
-                VisitType(nested, dispatchMap, methodLookup, autofacModuleTypes, autofacModuleLoadMethods, reflectionTypes);
+                VisitType(nested, dispatchMap, methodLookup, reflectionTypes);
             }
 
             var typeFqn = type.OriginalDefinition.ToDisplayString();
             reflectionTypes[typeFqn] = CreateReflectionTypeMetadata(type);
-
-            var isAutofacModule = IsOrDerivedFrom(type, "Autofac.Module");
-            if (isAutofacModule)
-            {
-                autofacModuleTypes.Add(typeFqn);
-            }
 
             foreach (var method in type.GetMembers().OfType<IMethodSymbol>())
             {
@@ -639,20 +615,13 @@ namespace Probe.Services.Analysis
                     });
                 }
 
-                if (isAutofacModule &&
-                    string.Equals(method.Name, "Load", StringComparison.Ordinal) &&
-                    method.Parameters.Length == 1)
-                {
-                    autofacModuleLoadMethods.Add(fqn);
-                }
-
                 if (method.OverriddenMethod == null)
                 {
                     continue;
                 }
 
                 var baseFqn = method.OverriddenMethod.OriginalDefinition.ToDisplayString();
-                ServiceRegistrationCollector.AddDispatchTarget(dispatchMap, baseFqn, fqn);
+                AddDispatchTarget(dispatchMap, baseFqn, fqn);
             }
 
             foreach (var iface in type.AllInterfaces)
@@ -665,7 +634,7 @@ namespace Probe.Services.Analysis
                         continue;
                     }
 
-                    ServiceRegistrationCollector.AddDispatchTarget(dispatchMap, interfaceMethod.OriginalDefinition.ToDisplayString(), implementation.OriginalDefinition.ToDisplayString());
+                    AddDispatchTarget(dispatchMap, interfaceMethod.OriginalDefinition.ToDisplayString(), implementation.OriginalDefinition.ToDisplayString());
                 }
             }
         }

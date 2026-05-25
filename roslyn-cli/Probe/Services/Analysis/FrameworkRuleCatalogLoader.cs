@@ -59,8 +59,7 @@ namespace Probe.Services.Analysis
                     "ReflectionConstructorDispatch", "ReflectionConstructorCandidate",
                     "ServiceProviderDispatch", "AutofacResolveDispatch", "EventDispatch",
                     "FrameworkDelegateDispatch", "FrameworkDelegateFallbackCandidate",
-                    "DelegateReference", "XamlEvent", "XamlActionBinding", "XamlCommandBinding",
-                    "XamlNavigation"
+                    "DelegateReference"
                 };
 
                 foreach (var key in expectedKeys)
@@ -98,10 +97,6 @@ namespace Probe.Services.Analysis
                 if (rules.TryGetValue("FrameworkDelegateDispatch", out var r17)) FrameworkRuleCatalog.FrameworkDelegateDispatch = r17;
                 if (rules.TryGetValue("FrameworkDelegateFallbackCandidate", out var r18)) FrameworkRuleCatalog.FrameworkDelegateFallbackCandidate = r18;
                 if (rules.TryGetValue("DelegateReference", out var r19)) FrameworkRuleCatalog.DelegateReference = r19;
-                if (rules.TryGetValue("XamlEvent", out var r20)) FrameworkRuleCatalog.XamlEvent = r20;
-                if (rules.TryGetValue("XamlActionBinding", out var r21)) FrameworkRuleCatalog.XamlActionBinding = r21;
-                if (rules.TryGetValue("XamlCommandBinding", out var r22)) FrameworkRuleCatalog.XamlCommandBinding = r22;
-                if (rules.TryGetValue("XamlNavigation", out var r23)) FrameworkRuleCatalog.XamlNavigation = r23;
             }
         }
     }

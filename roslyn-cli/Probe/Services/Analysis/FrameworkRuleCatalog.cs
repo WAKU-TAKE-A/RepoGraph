@@ -81,22 +81,11 @@ namespace Probe.Services.Analysis
         public static FrameworkRuleMetadata FrameworkDelegateDispatch { get; set; } =
             new("framework.delegate_dispatch", "framework", ExtractionRuleMode.HardEdge, "framework_delegate_dispatch");
 
-        public static FrameworkRuleMetadata FrameworkDelegateFallbackCandidate { get; set; } =
-            new("framework.delegate_fallback_candidate", "framework", ExtractionRuleMode.Candidate, "framework_delegate_fallback");
-
         public static FrameworkRuleMetadata DelegateReference { get; set; } =
             new("framework.delegate_reference", "framework", ExtractionRuleMode.HardEdge, "delegate_reference");
 
-        public static FrameworkRuleMetadata XamlEvent { get; set; } =
-            new("xaml.event_handler", "xaml", ExtractionRuleMode.HardEdge, "xaml_event");
+        public static FrameworkRuleMetadata FrameworkDelegateFallbackCandidate { get; set; } =
+            new("framework.delegate_fallback_candidate", "framework", ExtractionRuleMode.Candidate, "framework_delegate_fallback");
 
-        public static FrameworkRuleMetadata XamlActionBinding { get; set; } =
-            new("xaml.action_binding", "xaml", ExtractionRuleMode.HardEdge, "xaml_action_binding");
-
-        public static FrameworkRuleMetadata XamlCommandBinding { get; set; } =
-            new("xaml.command_binding", "xaml", ExtractionRuleMode.HardEdge, "xaml_command_binding");
-
-        public static FrameworkRuleMetadata XamlNavigation { get; set; } =
-            new("xaml.navigation", "xaml", ExtractionRuleMode.HardEdge, "xaml_navigation");
     }
 }

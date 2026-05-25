@@ -10,18 +10,12 @@ namespace Probe.Services.Analysis
         private readonly Dictionary<string, HashSet<string>> _dispatchMap;
         private readonly Dictionary<string, List<MethodLookupEntry>> _methodLookup;
         private readonly HashSet<string> _knownMethods;
-        private readonly HashSet<string> _autofacModuleTypes;
-        private readonly HashSet<string> _autofacModuleLoadMethods;
         private readonly Dictionary<string, ReflectionTypeMetadata> _reflectionTypes;
-        private readonly Dictionary<string, HashSet<string>> _serviceRegistrations;
 
         public CompilationAnalysisCache(
             Dictionary<string, HashSet<string>> dispatchMap,
             Dictionary<string, List<MethodLookupEntry>> methodLookup,
-            HashSet<string> autofacModuleTypes,
-            HashSet<string> autofacModuleLoadMethods,
-            Dictionary<string, ReflectionTypeMetadata> reflectionTypes,
-            Dictionary<string, HashSet<string>> serviceRegistrations)
+            Dictionary<string, ReflectionTypeMetadata> reflectionTypes)
         {
             _dispatchMap = dispatchMap;
             _methodLookup = methodLookup;
@@ -29,10 +23,7 @@ namespace Probe.Services.Analysis
                 .SelectMany(methods => methods)
                 .Select(method => method.Fqn)
                 .ToHashSet(StringComparer.Ordinal);
-            _autofacModuleTypes = autofacModuleTypes;
-            _autofacModuleLoadMethods = autofacModuleLoadMethods;
             _reflectionTypes = reflectionTypes;
-            _serviceRegistrations = serviceRegistrations;
         }
 
         public IEnumerable<string> GetDispatchTargets(IMethodSymbol calledMethod)
@@ -69,16 +60,6 @@ namespace Probe.Services.Analysis
             return _knownMethods.Contains(fqn);
         }
 
-        public IEnumerable<string> GetAutofacModuleTypes()
-        {
-            return _autofacModuleTypes;
-        }
-
-        public IEnumerable<string> GetAutofacModuleLoadMethods()
-        {
-            return _autofacModuleLoadMethods;
-        }
-
         public HashSet<string> GetAllTypeFqns()
         {
             return _reflectionTypes.Keys.ToHashSet(StringComparer.Ordinal);
@@ -95,51 +76,6 @@ namespace Probe.Services.Analysis
         public bool TryGetTypeMetadata(string fqn, out ReflectionTypeMetadata metadata)
         {
             return _reflectionTypes.TryGetValue(fqn, out metadata!);
-        }
-
-        public IEnumerable<string> ResolveServiceDispatchConstructors(string requestedTypeFqn)
-        {
-            List<string> candidateTypes;
-            if (_serviceRegistrations.TryGetValue(requestedTypeFqn, out var registeredImplementations))
-            {
-                candidateTypes = registeredImplementations
-                    .Distinct(StringComparer.Ordinal)
-                    .ToList();
-            }
-            else
-            {
-                candidateTypes = new List<string>();
-                if (_reflectionTypes.TryGetValue(requestedTypeFqn, out var requestedTypeMetadata) &&
-                    !requestedTypeMetadata.IsAbstract &&
-                    !requestedTypeMetadata.IsInterface)
-                {
-                    candidateTypes.Add(requestedTypeFqn);
-                }
-            }
-
-            candidateTypes = candidateTypes
-                .Distinct(StringComparer.Ordinal)
-                .ToList();
-
-            if (candidateTypes.Count != 1)
-            {
-                yield break;
-            }
-
-            if (!_reflectionTypes.TryGetValue(candidateTypes[0], out var resolvedType))
-            {
-                yield break;
-            }
-
-            var publicConstructors = resolvedType.Constructors
-                .Where(constructor => constructor.IsPublic)
-                .ToList();
-            if (publicConstructors.Count != 1)
-            {
-                yield break;
-            }
-
-            yield return publicConstructors[0].Fqn;
         }
 
         public IEnumerable<string> GetConstructorCandidates(IEnumerable<string> candidateTypeFqns, IReadOnlyList<string> parameterTypes)

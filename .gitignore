@@ -10,6 +10,7 @@ save-ai-outputs.py
 plan/
 tmp/
 tmpmsbuildcheck/
+distribution_trial/
 
 # Analysis Workspace (Output)
 analysis_workspace/
