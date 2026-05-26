@@ -8,7 +8,7 @@ AI は自分でファイルを読めます。RepoGraph の役割は、巨大リ�
 
 ## 何をするツールか
 
-- `Probe` が Roslyn / MSBuild で `.sln` / `.csproj` を解析し、確定的な構造データ（Hard graph）と、DSL ルールによる推測データ（Candidate edges）を出力します。
+- `Probe` が Roslyn / MSBuild で `.sln` / `.csproj` を解析し、確定的な構造データ（Hard graph）と、DSL ルールによる推測データ（Candidate edges）を出力します。DSL ルールは `probe/rules/dsl/*.json` に配置されます。
 - `python-rag` がその出力を使い、`hotspots`、`isolation`、`related`、`ai-candidates` などの調査入口を作ります。
 - `ai_soft_edges.json` を別レイヤーのオーバーレイとして扱い、XAML / reflection / DI のような hard graph で取り切れない難所を AI 補助で扱えます。
 

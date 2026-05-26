@@ -141,3 +141,16 @@ Current architectural direction:
 ## 9. Recent Refactoring
 
 - **SymbolExtractor Refactor**: The SymbolExtractor class has been successfully refactored from a single God Class into focused analysis components (DirectCallExtractor, ReflectionDispatchExtractor, TypeDependencyExtractor, etc.). SymbolExtractor now focuses primarily on traversal orchestration. Do not add unrelated new heuristics directly back into SymbolExtractor. Create or update specialized extractors.
+
+## 10. DSL Rule Authoring Guide
+
+When structural hard extraction is insufficient for framework or package-specific behavior, do **not** add package-specific heuristics to the C# core. Instead, author a DSL Candidate rule or use AI soft edges.
+
+- **Location**: Production DSL candidate rules live under `rules/dsl/*.json`.
+- **Format**: Rules use a single JSON DSL shape: `id`, `scope`, `match`, `bind`, `resolve`, `emit`.
+- **Traceability**: `rule_id` and `rule_family` are required in the `emit` block.
+- **Rule Mode**: `emit.rule_mode` must be set to `candidate`.
+- **Meaning**: DSL Candidate edges are candidate evidence, not HardEdge facts.
+- **Unsupported Behavior**: If the current DSL cannot express the heuristic, do not expand the C# core. Fall back to AI soft edges, post-processing, or future project-specific override work (`rules/project-overrides/` is a planned future surface, not yet implemented).
+
+Use existing files in `rules/dsl/` as examples.
