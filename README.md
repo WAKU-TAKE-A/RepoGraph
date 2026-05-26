@@ -31,8 +31,8 @@ RepoGraph/
     Probe.dll
     Probe.runtimeconfig.json
     Probe.deps.json
-    rules/
-      framework_rules.json
+      rules/
+        dsl/
     BuildHost-net472/
     BuildHost-netcore/
     runtimes/

@@ -510,21 +510,7 @@ def ai_candidates(
     engine.dispose()
 
 
-@app.command("rules")
-def show_rules(
-    workspace: str = typer.Option(None, "--workspace", "-w", help="Override analysis workspace directory"),
-    family: str = typer.Option(None, "--family", help="Filter by rule family"),
-    mode: str = typer.Option(None, "--mode", help="Filter by rule mode (e.g. HardEdge, Candidate)"),
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
-):
-    """Show the externalized framework rule catalog."""
-    from reporting import show_framework_rules
-    repo_dir = workspace if workspace else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    output = show_framework_rules(repo_dir, family, mode, json_output)
-    if output:
-        print(output)
-    else:
-        print(f"Rule catalog not found at {os.path.join(repo_dir, 'rules', 'framework_rules.json')}")
+
 
 if __name__ == "__main__":
     app()

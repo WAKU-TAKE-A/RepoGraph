@@ -202,29 +202,4 @@ def show_isolation_report(
     return "\n".join(lines)
 
 
-def show_framework_rules(repo_dir: str, family: str | None, mode: str | None, json_output: bool) -> str:
-    rules_path = os.path.join(repo_dir, "rules", "framework_rules.json")
-    if not os.path.exists(rules_path):
-        return ""
-    
-    payload = load_json_file(rules_path)
-    
-    filtered = {}
-    for key, val in payload.items():
-        if family and val.get("Family") != family:
-            continue
-        if mode and val.get("Mode") != mode:
-            continue
-        filtered[key] = val
-        
-    if json_output:
-        return json.dumps(filtered, indent=2, ensure_ascii=False)
-        
-    lines = []
-    for key, val in filtered.items():
-        lines.append(f"[{val.get('Family', 'unknown')}] {key}")
-        lines.append(f"  - RuleId: {val.get('RuleId')}")
-        lines.append(f"  - Mode: {val.get('Mode')}")
-        lines.append(f"  - CallType: {val.get('CallType')}")
-    
-    return "\n".join(lines)
+

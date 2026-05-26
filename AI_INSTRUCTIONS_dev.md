@@ -32,6 +32,7 @@ RepoGraph/
     Probe/
   python-rag/
   rules/
+    dsl/
   plan/
   README.md
   AI_INSTRUCTIONS.md
@@ -42,7 +43,7 @@ Key areas:
 
 - `roslyn-cli/Probe`: C# extractor
 - `python-rag`: Python analysis and CLI
-- `rules/framework_rules.json`: rule metadata catalog
+- `rules/dsl/*.json`: production DSL candidate rules
 - `plan/`: working notes and handoff files, not for commit
 
 Corresponding distribution layout:
@@ -108,12 +109,11 @@ Test principle:
 
 - Keep `plan/` out of commits.
 - Do not commit temporary files from `analysis_workspace/`.
-- Keep `rules/framework_rules.json` tracked.
+- Keep `rules/dsl/*.json` tracked.
 - When changing heuristic logic, ask whether the logic belongs in:
   - structural hard extraction
-  - rule metadata
-  - candidate surfacing
-  - AI soft edge overlay
+  - DSL candidate rules (if expressible by the current DSL)
+  - AI soft edge overlay (if unsupported package-specific behavior)
 
 ## 7. Release Guidance
 
@@ -133,7 +133,9 @@ Current architectural direction:
 
 - hard graph stays deterministic
 - difficult framework-owned or dynamic edges should often become candidates, not forced hard edges
-- rule metadata should stay visible through C# to Python to CLI/JSON
+- C# core should not carry package/framework heuristic catalogs
+- external package/framework heuristics are represented as DSL candidates only when expressible by the current DSL
+- unsupported package-specific behavior is left to AI/post-processing rather than preserved in core
 - RepoGraph should help AI ask better questions, not pretend to fully decide usage or dead code
 
 ## 9. Recent Refactoring
