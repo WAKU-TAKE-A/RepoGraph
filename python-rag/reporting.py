@@ -171,7 +171,6 @@ def show_isolation_report(
                 "rule_family_summary": "Shows the distribution of framework rule families involved. Use this as a map of the domain context.",
                 "rule_mode_summary": "Shows the mix of HardEdge vs Candidate rules. Candidate rules are unconfirmed heuristics requiring review.",
                 "recommended_commands": [
-                    "python-rag/main.py rules --json",
                     "python-rag/main.py symbols \"<fqn>\"",
                     "python-rag/main.py related \"<fqn>\"",
                     "python-rag/main.py show-ai-edges"
