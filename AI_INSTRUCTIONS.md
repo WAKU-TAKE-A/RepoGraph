@@ -6,6 +6,7 @@ You are using RepoGraph as a map for exploring a large C# / .NET repository.
 
 RepoGraph is not a verdict engine.
 RepoGraph is a navigation aid that helps you decide what to read next.
+Hard graph extraction stays deterministic. External heuristics are provided as DSL candidate edges.
 
 Treat these as primary:
 
