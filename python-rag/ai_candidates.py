@@ -459,9 +459,8 @@ def build_ai_candidate_bundle(workspace: str | None, kind: str, payload: list[di
             "HardEdge": "Confirmed by strict C# parsing rules.",
             "Candidate": "Heuristically flagged as suspicious but unconfirmed. Requires AI or manual review."
         },
-        "rule_family_summary": "Candidates typically involve families like 'xaml', 'reflection', or 'di'. Use the 'rules' CLI to view the catalog.",
+        "rule_family_summary": "Candidates typically involve families like 'xaml', 'reflection', or 'di'.",
         "recommended_commands": [
-            "python-rag/main.py rules --json",
             f"python-rag/main.py symbols --workspace {workspace or '<workspace>'} \"<fqn>\"",
             f"python-rag/main.py import-ai-edges <soft_edges.json> --workspace {workspace or '<workspace>'}"
         ],
