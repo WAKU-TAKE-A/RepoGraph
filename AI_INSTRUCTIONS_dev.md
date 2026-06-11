@@ -1,22 +1,22 @@
-# RepoGraph: Development Instructions for AI Agent
+# RoslynGraphAI: Development Instructions for AI Agent
 
 ## 1. Scope
 
-This file is for AI agents that modify RepoGraph itself.
+This file is for AI agents that modify RoslynGraphAI itself.
 
 Use this file only when you are:
 
-- editing C# or Python code inside RepoGraph
+- editing C# or Python code inside RoslynGraphAI
 - changing extraction logic
 - updating CLI behavior
 - adding tests
 - preparing a release
 
-For normal repository analysis with RepoGraph, use `AI_INSTRUCTIONS.md` instead.
+For normal repository analysis with RoslynGraphAI, use `AI_INSTRUCTIONS.md` instead.
 
 ## 2. Development Principles
 
-- RepoGraph is a map, not a verdict engine.
+- RoslynGraphAI is a map, not a verdict engine.
 - Prefer deterministic hard graph extraction for structural facts.
 - Use AI soft edges as a separate overlay, not as silent hard promotion.
 - Avoid adding narrow project-specific heuristics unless the rule is likely to generalize.
@@ -27,7 +27,7 @@ For normal repository analysis with RepoGraph, use `AI_INSTRUCTIONS.md` instead.
 In this repository, source layout is:
 
 ```text
-RepoGraph/
+RoslynGraphAI/
   roslyn-cli/
     Probe/
   python-rag/
@@ -60,21 +60,21 @@ Use source-based commands only in development mode.
 Build:
 
 ```powershell
-& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" build C:\tmp\RepoGraph\roslyn-cli\Probe\Probe.csproj
+& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" build C:\tmp\RoslynGraphAI\roslyn-cli\Probe\Probe.csproj
 ```
 
 Run from source:
 
 ```powershell
 $env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
-& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" run --project C:\tmp\RepoGraph\roslyn-cli\Probe\Probe.csproj -- scan <TARGET_SLN_OR_CSPROJ> --output C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
+& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" run --project C:\tmp\RoslynGraphAI\roslyn-cli\Probe\Probe.csproj -- scan <TARGET_SLN_OR_CSPROJ> --output C:\tmp\RoslynGraphAI\analysis_workspace\<workspace_name>
 ```
 
 Python examples:
 
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py hotspots --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name>
-C:\tmp\RepoGraph\.venv\Scripts\python.exe C:\tmp\RepoGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\RepoGraph\analysis_workspace\<workspace_name> --json
+C:\tmp\RoslynGraphAI\.venv\Scripts\python.exe C:\tmp\RoslynGraphAI\python-rag\main.py hotspots --workspace C:\tmp\RoslynGraphAI\analysis_workspace\<workspace_name>
+C:\tmp\RoslynGraphAI\.venv\Scripts\python.exe C:\tmp\RoslynGraphAI\python-rag\main.py show-ai-edges --workspace C:\tmp\RoslynGraphAI\analysis_workspace\<workspace_name> --json
 ```
 
 ## 5. Testing
@@ -84,20 +84,20 @@ Run focused tests for the area you changed.
 Common Python test commands:
 
 ```powershell
-C:\tmp\RepoGraph\.venv\Scripts\python.exe -m unittest test_main test_soft_edges
-C:\tmp\RepoGraph\.venv\Scripts\python.exe -m unittest test_main test_isolation test_hotspots test_soft_edges test_retrieval test_summarize
+C:\tmp\RoslynGraphAI\.venv\Scripts\python.exe -m unittest test_main test_soft_edges
+C:\tmp\RoslynGraphAI\.venv\Scripts\python.exe -m unittest test_main test_isolation test_hotspots test_soft_edges test_retrieval test_summarize
 ```
 
 Run them from:
 
 ```text
-C:\tmp\RepoGraph\python-rag
+C:\tmp\RoslynGraphAI\python-rag
 ```
 
 C# verification:
 
 ```powershell
-& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" build C:\tmp\RepoGraph\roslyn-cli\Probe\Probe.csproj
+& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" build C:\tmp\RoslynGraphAI\roslyn-cli\Probe\Probe.csproj
 ```
 
 Test principle:
@@ -136,7 +136,7 @@ Current architectural direction:
 - C# core should not carry package/framework heuristic catalogs
 - external package/framework heuristics are represented as DSL candidates only when expressible by the current DSL
 - unsupported package-specific behavior is left to AI/post-processing rather than preserved in core
-- RepoGraph should help AI ask better questions, not pretend to fully decide usage or dead code
+- RoslynGraphAI should help AI ask better questions, not pretend to fully decide usage or dead code
 
 ## 9. Recent Refactoring
 

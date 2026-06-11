@@ -1,10 +1,10 @@
-# RepoGraph (v0.9.10.0)
+# RoslynGraphAI (v0.9.10.0)
 
-RepoGraph は、巨大な C# / .NET リポジトリを生成 AI が探索しやすくするための解析ツールです。
+RoslynGraphAI は、巨大な C# / .NET リポジトリを生成 AI が探索しやすくするための解析ツールです。
 
 基本原則:
-RepoGraph は「答えを出すツール」ではなく、「AI が質問を立てるためのツール」です。
-AI は自分でファイルを読めます。RepoGraph の役割は、巨大リポジトリで AI が迷子にならないための地図を提供することに限定します。
+RoslynGraphAI は「答えを出すツール」ではなく、「AI が質問を立てるためのツール」です。
+AI は自分でファイルを読めます。RoslynGraphAI の役割は、巨大リポジトリで AI が迷子にならないための地図を提供することに限定します。
 
 ## 何をするツールか
 
@@ -12,7 +12,7 @@ AI は自分でファイルを読めます。RepoGraph の役割は、巨大リ�
 - `python-rag` がその出力を使い、`hotspots`、`isolation`、`related`、`ai-candidates` などの調査入口を作ります。
 - `ai_soft_edges.json` を別レイヤーのオーバーレイとして扱い、XAML / reflection / DI のような hard graph で取り切れない難所を AI 補助で扱えます。
 
-RepoGraph は、次のような用途に向いています。
+RoslynGraphAI は、次のような用途に向いています。
 
 - 巨大なレガシーコードの初期把握
 - どこから読むべきかの優先順位付け
@@ -25,7 +25,7 @@ RepoGraph は、次のような用途に向いています。
 通常利用では、次のような配置を想定します。
 
 ```text
-RepoGraph/
+RoslynGraphAI/
   probe/
     Probe.exe
     Probe.dll
@@ -54,7 +54,7 @@ RepoGraph/
 - 通常利用は `probe/Probe.exe` 配布レイアウトを前提にします。開発時だけ `roslyn-cli/Probe` と `dotnet build/run` を使います。
 - `analysis_workspace/` は解析結果の出力先です。
 - `README.md` は人間向け、`AI_INSTRUCTIONS.md` は通常利用時に AI へ見せるための文書です。
-- RepoGraph 本体を改造する場合は [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を参照してください。
+- RoslynGraphAI 本体を改造する場合は [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を参照してください。
 
 ## 必要環境
 
@@ -69,71 +69,44 @@ RepoGraph/
 - .NET Framework Developer Pack / targeting pack
 - 対象ソリューション固有の workload
 
-つまり、RepoGraph 本体は zip 配布しやすいですが、対象リポジトリを解析できるかは対象側のビルド環境にも依存します。
+つまり、RoslynGraphAI 本体は zip 配布しやすいですが、対象リポジトリを解析できるかは対象側のビルド環境にも依存します。
 
-## クイックスタート
+## クイックスタート (AI に使わせる場合)
 
-1. `Probe.exe` で構造データを作ります。
+通常利用では、人間は環境構築を行った上で、AI にこの `README.md` と [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を読ませて解析を指示してください。
 
-```powershell
-.\probe\Probe.exe scan <TARGET_SLN_OR_CSPROJ> --output .\analysis_workspace\<workspace_name>
+### 1. Release zip の展開
+
+GitHub の Release ページから `RoslynGraphAI-vX.Y.Z.zip` などの最新の配布用 zip ファイルをダウンロードし、任意のディレクトリに展開します。
+展開すると、以下のような構成になります。
+
+```text
+RoslynGraphAI/
+  probe/
+  python-rag/
+  README.md
+  AI_INSTRUCTIONS.md
+  ...
 ```
 
-2. `hotspots` を作ります。
+### 2. Python 依存ライブラリのインストール
+
+`python-rag` を実行するために、いくつかの Python パッケージが必要です。展開したディレクトリで以下のコマンドを実行し、必要なパッケージをインストールしてください。（※ `requirements.txt` が同梱されている場合は `pip install -r requirements.txt` を実行してください）
 
 ```powershell
-python .\python-rag\main.py hotspots --workspace .\analysis_workspace\<workspace_name>
+pip install typer pyyaml sqlalchemy loguru
 ```
 
-3. 必要なら `isolation` を作ります。
+### 3. AI への指示
 
-```powershell
-python .\python-rag\main.py isolation --workspace .\analysis_workspace\<workspace_name>
-```
+環境の準備ができたら、AI エージェント（Copilot, ChatGPT, Claude など）に以下のように指示を出します。
 
-4. 近い既存実装を探したいなら `related` を使います。
+1. **ドキュメントの読み込み**: 「まず `README.md` と `AI_INSTRUCTIONS.md` を読んでください。」
+2. **目的の共有**: 「〇〇のバグを修正したいです」「××の仕様について調査してください」など、目的を伝えます。
 
-```powershell
-python .\python-rag\main.py related "<known FQN or symbol>" --workspace .\analysis_workspace\<workspace_name>
-```
+以降は AI が `AI_INSTRUCTIONS.md` の手順に従い、自律的に `Probe.exe` の実行や `python-rag` による情報収集を行ってくれます。
 
-## まず使う軽量コマンド
-
-AI に最初から raw `grep` をさせるのではなく、まず RepoGraph の軽量コマンドで地図を確認する想定です。
-
-```powershell
-python .\python-rag\main.py files --workspace .\analysis_workspace\<workspace_name> --limit 30
-python .\python-rag\main.py symbols --workspace .\analysis_workspace\<workspace_name> "<name or FQN>"
-python .\python-rag\main.py show-hotspots --workspace .\analysis_workspace\<workspace_name> --limit 20
-python .\python-rag\main.py show-isolation --workspace .\analysis_workspace\<workspace_name> --limit 20
-python .\python-rag\main.py show-isolation --workspace .\analysis_workspace\<workspace_name> --compare-ai-soft-edges
-python .\python-rag\main.py graph-meta --workspace .\analysis_workspace\<workspace_name>
-python .\python-rag\main.py xaml-candidates --workspace .\analysis_workspace\<workspace_name> --limit 20
-python .\python-rag\main.py ai-candidates --workspace .\analysis_workspace\<workspace_name> --kind all --limit 20
-python .\python-rag\main.py show-ai-edges --workspace .\analysis_workspace\<workspace_name> --limit 20 --json
-```
-
-## AI soft edge の流れ
-
-1. `xaml-candidates` または `ai-candidates --kind xaml|reflection|di` で候補を絞ります。
-2. `ai-candidates --bundle-path ...` で AI に渡す JSON bundle を作ります。
-3. AI が `ai_soft_edges.json` を返します。
-4. `import-ai-edges` で取り込みます。
-5. `show-ai-edges --json` で品質を確認します。
-6. 必要に応じて `isolation` / `related` に opt-in で重ねます。
-
-## 通常利用時の注意
-
-- `isolation` は最終判定ではなく、調査入口です。
-- `hotspots` や graph の方が主役です。
-- `reflection`、`DI`、`framework convention`、`dispatch` はまだ完全ではありません。
-- `ai_soft_edges.json` は hard graph に混ぜず、別レイヤーとして扱う前提です。
-
-## AI に使わせる場合
-
-通常利用では、人間はまずこの `README.md` を読み、AI には `README.md` と [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を見せてください。
-
-`AI_INSTRUCTIONS.md` は通常利用向けです。RepoGraph 本体を改造する AI には [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を使ってください。
+※ RoslynGraphAI 本体を改造する AI には [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を使ってください。
 
 ## License
 
