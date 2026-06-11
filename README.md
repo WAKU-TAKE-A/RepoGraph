@@ -73,8 +73,6 @@ RoslynGraphAI/
 
 ## クイックスタート (AI に使わせる場合)
 
-通常利用では、人間は環境構築を行った上で、AI にこの `README.md` と [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) を読ませて解析を指示してください。
-
 ### 1. Release zip の展開
 
 GitHub の Release ページから `RoslynGraphAI-vX.Y.Z.zip` などの最新の配布用 zip ファイルをダウンロードし、任意のディレクトリに展開します。
@@ -102,9 +100,24 @@ pip install typer pyyaml sqlalchemy loguru
 環境の準備ができたら、AI エージェント（Copilot, ChatGPT, Claude など）に以下のように指示を出します。
 
 1. **ドキュメントの読み込み**: 「まず `README.md` と `AI_INSTRUCTIONS.md` を読んでください。」
+
+---
+例：
+
+![README001](README001.jpg)
+
+---
+
 2. **目的の共有**: 「〇〇のバグを修正したいです」「××の仕様について調査してください」など、目的を伝えます。
 
-以降は AI が `AI_INSTRUCTIONS.md` の手順に従い、自律的に `Probe.exe` の実行や `python-rag` による情報収集を行ってくれます。
+---
+例：
+
+![README001](README002.jpg)
+
+---
+
+3. 以降は AI が `AI_INSTRUCTIONS.md` の手順に従い、自律的に `Probe.exe` の実行や `python-rag` による情報収集を行ってくれます。
 
 ※ RoslynGraphAI 本体を改造する AI には [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を使ってください。
 
