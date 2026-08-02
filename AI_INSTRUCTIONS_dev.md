@@ -1,22 +1,22 @@
-# RoslynGraphAI: Development Instructions for AI Agent
+# AIRoslynGraph: Development Instructions for AI Agent
 
 ## 1. Scope
 
-This file is for AI agents that modify RoslynGraphAI itself.
+This file is for AI agents that modify AIRoslynGraph itself.
 
 Use this file only when you are:
 
-- editing C# or Python code inside RoslynGraphAI
+- editing C# or Python code inside AIRoslynGraph
 - changing extraction logic
 - updating CLI behavior
 - adding tests
 - preparing a release
 
-For normal repository analysis with RoslynGraphAI, use `AI_INSTRUCTIONS.md` instead.
+For normal repository analysis with AIRoslynGraph, use `AI_INSTRUCTIONS.md` instead.
 
 ## 2. Development Principles
 
-- RoslynGraphAI is a map, not a verdict engine.
+- AIRoslynGraph is a map, not a verdict engine.
 - Prefer deterministic hard graph extraction for structural facts.
 - Use AI soft edges as a separate overlay, not as silent hard promotion.
 - Avoid adding narrow project-specific heuristics unless the rule is likely to generalize.
@@ -27,7 +27,7 @@ For normal repository analysis with RoslynGraphAI, use `AI_INSTRUCTIONS.md` inst
 In this repository, source layout is:
 
 ```text
-RoslynGraphAI/
+AIRoslynGraph/
   roslyn-cli/
     Probe/
   python-rag/
@@ -60,21 +60,21 @@ Use source-based commands only in development mode.
 Build:
 
 ```powershell
-& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" build C:\tmp\RoslynGraphAI\roslyn-cli\Probe\Probe.csproj
+& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" build C:\tmp\AIRoslynGraph\roslyn-cli\Probe\Probe.csproj
 ```
 
 Run from source:
 
 ```powershell
 $env:DOTNET_ROOT = "C:\tools\dotnet-sdk-8.0.421-win-x64"
-& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" run --project C:\tmp\RoslynGraphAI\roslyn-cli\Probe\Probe.csproj -- scan <TARGET_SLN_OR_CSPROJ> --output C:\tmp\RoslynGraphAI\analysis_workspace\<workspace_name>
+& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" run --project C:\tmp\AIRoslynGraph\roslyn-cli\Probe\Probe.csproj -- scan <TARGET_SLN_OR_CSPROJ> --output C:\tmp\AIRoslynGraph\analysis_workspace\<workspace_name>
 ```
 
 Python examples:
 
 ```powershell
-C:\tmp\RoslynGraphAI\.venv\Scripts\python.exe C:\tmp\RoslynGraphAI\python-rag\main.py hotspots --workspace C:\tmp\RoslynGraphAI\analysis_workspace\<workspace_name>
-C:\tmp\RoslynGraphAI\.venv\Scripts\python.exe C:\tmp\RoslynGraphAI\python-rag\main.py show-ai-edges --workspace C:\tmp\RoslynGraphAI\analysis_workspace\<workspace_name> --json
+C:\tmp\AIRoslynGraph\.venv\Scripts\python.exe C:\tmp\AIRoslynGraph\python-rag\main.py hotspots --workspace C:\tmp\AIRoslynGraph\analysis_workspace\<workspace_name>
+C:\tmp\AIRoslynGraph\.venv\Scripts\python.exe C:\tmp\AIRoslynGraph\python-rag\main.py show-ai-edges --workspace C:\tmp\AIRoslynGraph\analysis_workspace\<workspace_name> --json
 ```
 
 ## 5. Testing
@@ -84,20 +84,20 @@ Run focused tests for the area you changed.
 Common Python test commands:
 
 ```powershell
-C:\tmp\RoslynGraphAI\.venv\Scripts\python.exe -m unittest test_main test_soft_edges
-C:\tmp\RoslynGraphAI\.venv\Scripts\python.exe -m unittest test_main test_isolation test_hotspots test_soft_edges test_retrieval test_summarize
+C:\tmp\AIRoslynGraph\.venv\Scripts\python.exe -m unittest test_main test_soft_edges
+C:\tmp\AIRoslynGraph\.venv\Scripts\python.exe -m unittest test_main test_isolation test_hotspots test_soft_edges test_retrieval test_summarize
 ```
 
 Run them from:
 
 ```text
-C:\tmp\RoslynGraphAI\python-rag
+C:\tmp\AIRoslynGraph\python-rag
 ```
 
 C# verification:
 
 ```powershell
-& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" build C:\tmp\RoslynGraphAI\roslyn-cli\Probe\Probe.csproj
+& "C:\tools\dotnet-sdk-8.0.421-win-x64\dotnet.exe" build C:\tmp\AIRoslynGraph\roslyn-cli\Probe\Probe.csproj
 ```
 
 Test principle:
@@ -136,7 +136,7 @@ Current architectural direction:
 - C# core should not carry package/framework heuristic catalogs
 - external package/framework heuristics are represented as DSL candidates only when expressible by the current DSL
 - unsupported package-specific behavior is left to AI/post-processing rather than preserved in core
-- RoslynGraphAI should help AI ask better questions, not pretend to fully decide usage or dead code
+- AIRoslynGraph should help AI ask better questions, not pretend to fully decide usage or dead code
 
 ## 9. Recent Refactoring
 

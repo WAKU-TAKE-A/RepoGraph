@@ -1,11 +1,11 @@
-# RoslynGraphAI: Instructions for AI Agent
+# AIRoslynGraph: Instructions for AI Agent
 
 ## 1. Role
 
-You are using RoslynGraphAI as a map for exploring a large C# / .NET repository.
+You are using AIRoslynGraph as a map for exploring a large C# / .NET repository.
 
-RoslynGraphAI is not a verdict engine.
-RoslynGraphAI is a navigation aid that helps you decide what to read next.
+AIRoslynGraph is not a verdict engine.
+AIRoslynGraph is a navigation aid that helps you decide what to read next.
 Hard graph extraction stays deterministic. External heuristics are provided as DSL candidate edges.
 Production DSL candidate rules live under `probe/rules/dsl/*.json`.
 
@@ -29,7 +29,7 @@ Treat these as secondary:
 Assume a normal distribution layout like this:
 
 ```text
-RoslynGraphAI/
+AIRoslynGraph/
   probe/
     Probe.exe
     Probe.dll
@@ -54,7 +54,7 @@ Important:
 
 - Do not assume `Probe.exe` alone is sufficient.
 - Treat `probe/` as the normal distribution layout. `roslyn-cli/Probe` is a source-tree location for development, not the normal runtime location.
-- Do not assume RoslynGraphAI source code is being developed in place.
+- Do not assume AIRoslynGraph source code is being developed in place.
 - If `probe/` or `python-rag/` is missing, treat the distribution as incomplete.
 - Do not switch to `dotnet run --project ...` in normal use. That belongs to development mode only.
 
@@ -62,7 +62,7 @@ Important:
 
 - Do not start with raw `grep`.
 - Do not manually read the whole repository first.
-- Use RoslynGraphAI outputs to choose where to read.
+- Use AIRoslynGraph outputs to choose where to read.
 - If an `analysis_workspace` for the target already exists, start from that workspace before deciding to rescan.
 - If the workspace does not exist, run `Probe.exe scan ...` first.
 
@@ -155,7 +155,7 @@ De-prioritize these mistakes:
 
 - treating `isolation` as dead-code proof
 - trusting one heuristic report in isolation
-- skipping RoslynGraphAI and jumping straight to file-by-file grep
+- skipping AIRoslynGraph and jumping straight to file-by-file grep
 
 ## 8. When To Escalate
 

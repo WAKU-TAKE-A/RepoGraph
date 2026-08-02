@@ -1,10 +1,10 @@
-# RoslynGraphAI (v0.9.10.0)
+# AIRoslynGraph (v0.9.10.0)
 
-RoslynGraphAI は、巨大な C# / .NET リポジトリを生成 AI が探索しやすくするための解析ツールです。
+AIRoslynGraph は、巨大な C# / .NET リポジトリを生成 AI が探索しやすくするための解析ツールです。
 
 基本原則:
-RoslynGraphAI は「答えを出すツール」ではなく、「AI が質問を立てるためのツール」です。
-AI は自分でファイルを読めます。RoslynGraphAI の役割は、巨大リポジトリで AI が迷子にならないための地図を提供することに限定します。
+AIRoslynGraph は「答えを出すツール」ではなく、「AI が質問を立てるためのツール」です。
+AI は自分でファイルを読めます。AIRoslynGraph の役割は、巨大リポジトリで AI が迷子にならないための地図を提供することに限定します。
 
 ## 何をするツールか
 
@@ -12,7 +12,7 @@ AI は自分でファイルを読めます。RoslynGraphAI の役割は、巨大
 - `python-rag` がその出力を使い、`hotspots`、`isolation`、`related`、`ai-candidates` などの調査入口を作ります。
 - `ai_soft_edges.json` を別レイヤーのオーバーレイとして扱い、XAML / reflection / DI のような hard graph で取り切れない難所を AI 補助で扱えます。
 
-RoslynGraphAI は、次のような用途に向いています。
+AIRoslynGraph は、次のような用途に向いています。
 
 - 巨大なレガシーコードの初期把握
 - どこから読むべきかの優先順位付け
@@ -25,7 +25,7 @@ RoslynGraphAI は、次のような用途に向いています。
 通常利用では、次のような配置を想定します。
 
 ```text
-RoslynGraphAI/
+AIRoslynGraph/
   probe/
     Probe.exe
     Probe.dll
@@ -54,7 +54,7 @@ RoslynGraphAI/
 - 通常利用は `probe/Probe.exe` 配布レイアウトを前提にします。開発時だけ `roslyn-cli/Probe` と `dotnet build/run` を使います。
 - `analysis_workspace/` は解析結果の出力先です。
 - `README.md` は人間向け、`AI_INSTRUCTIONS.md` は通常利用時に AI へ見せるための文書です。
-- RoslynGraphAI 本体を改造する場合は [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を参照してください。
+- AIRoslynGraph 本体を改造する場合は [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を参照してください。
 
 ## 必要環境
 
@@ -69,17 +69,17 @@ RoslynGraphAI/
 - .NET Framework Developer Pack / targeting pack
 - 対象ソリューション固有の workload
 
-つまり、RoslynGraphAI 本体は zip 配布しやすいですが、対象リポジトリを解析できるかは対象側のビルド環境にも依存します。
+つまり、AIRoslynGraph 本体は zip 配布しやすいですが、対象リポジトリを解析できるかは対象側のビルド環境にも依存します。
 
 ## クイックスタート (AI に使わせる場合)
 
 ### 1. Release zip の展開
 
-GitHub の Release ページから `RoslynGraphAI-vX.Y.Z.zip` などの最新の配布用 zip ファイルをダウンロードし、任意のディレクトリに展開します。
+GitHub の Release ページから `AIRoslynGraph-vX.Y.Z.zip` などの最新の配布用 zip ファイルをダウンロードし、任意のディレクトリに展開します。
 展開すると、以下のような構成になります。
 
 ```text
-RoslynGraphAI/
+AIRoslynGraph/
   probe/
   python-rag/
   README.md
@@ -119,7 +119,7 @@ pip install typer pyyaml sqlalchemy loguru
 
 3. 以降は AI が `AI_INSTRUCTIONS.md` の手順に従い、自律的に `Probe.exe` の実行や `python-rag` による情報収集を行ってくれます。
 
-※ RoslynGraphAI 本体を改造する AI には [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を使ってください。
+※ AIRoslynGraph 本体を改造する AI には [AI_INSTRUCTIONS_dev.md](AI_INSTRUCTIONS_dev.md) を使ってください。
 
 ## License
 
